@@ -4,7 +4,7 @@
   "title": "Market Snapshot Reference v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "snapshot_id", "mode", "trust_policy", "source", "query", "calendar", "contract_mapping", "resolved_at", "local_cache"],
+  "required": ["schema", "snapshot_id", "mode", "trust_policy", "source", "query", "calendar", "contract_mapping", "resolved_at"],
   "properties": {
     "schema": {"const": "quant-research.market-snapshot-ref.v1"},
     "snapshot_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
@@ -15,7 +15,6 @@
     "calendar": {"type": "string", "minLength": 1},
     "contract_mapping": {"type": ["string", "null"]},
     "resolved_at": {"type": "string", "format": "date-time"},
-    "local_cache": {"enum": ["none", "ephemeral", "persistent"]},
     "verification": {
       "type": "object",
       "additionalProperties": false,

@@ -4,7 +4,7 @@
   "title": "Materialized Market Snapshot v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "snapshot_id", "mode", "source_snapshot_ref", "source", "query", "calendar", "catalog", "coverage", "partitions", "resolved_at", "local_cache"],
+  "required": ["schema", "snapshot_id", "mode", "source_snapshot_ref", "source", "query", "calendar", "catalog", "coverage", "partitions", "resolved_at"],
   "properties": {
     "schema": {"const": "quant-research.market-snapshot.v1"},
     "snapshot_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
@@ -26,7 +26,6 @@
         }
       }
     },
-    "resolved_at": {"type": "string", "format": "date-time"},
-    "local_cache": {"enum": ["none", "ephemeral", "persistent"]}
+    "resolved_at": {"type": "string", "format": "date-time"}
   }
 }
