@@ -29,6 +29,10 @@ Each successful run also writes `strategy_spec.json` and
 `strategy_decisions.json`. These are neutral, pre-matching golden-contract
 artifacts; they contain no fills or precomputed execution results.
 
+`run_manifest.json.config_hash` is the SHA-256 of the exact `--config` file
+bytes. Reformatting the JSON intentionally changes the run identity while the
+canonical `strategy_spec_hash` remains unchanged.
+
 ## Verify
 
 ```powershell

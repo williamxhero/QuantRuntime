@@ -23,7 +23,7 @@ class WrittenRun:
 
 def write_successful_run(config: RunConfig, result: DiscoveryResult, output: Path) -> WrittenRun:
     output.mkdir(parents=True, exist_ok=True)
-    config_hash = sha256_value(config.raw)
+    config_hash = config.config_hash
     strategy_spec_hash = sha256_value(config.strategy_spec)
     decisions = build_strategy_decisions(
         result.candidates,
@@ -89,7 +89,7 @@ def write_failed_run(
             "message": str(error),
         },
     )
-    config_hash = sha256_value(config.raw)
+    config_hash = config.config_hash
     strategy_spec_hash = sha256_value(config.strategy_spec)
     run_id = _run_id(config_hash, strategy_spec_hash, "unavailable")
     manifest = _manifest(

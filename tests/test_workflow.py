@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import date
 from pathlib import Path
@@ -28,6 +29,9 @@ def test_workflow_calls_qlib_and_writes_manifest(
     assert manifest["schema"] == "markethub-qlib.run-manifest.v1"
     assert manifest["framework"] == "Qlib"
     assert manifest["framework_version"] == "0.9.7"
+    assert manifest["config_hash"] == hashlib.sha256(
+        (ROOT / "configs" / "s-smoke.json").read_bytes()
+    ).hexdigest()
     assert len(manifest["canonical_input_hash"]) == 64
     assert all(
         set(item) == {"relative_path", "sha256", "content_bytes"} for item in manifest["artifacts"]

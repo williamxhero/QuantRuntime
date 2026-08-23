@@ -6,6 +6,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from .canonical import sha256_bytes
+
 REQUIRED_FIELDS = {"close", "pre_close"}
 ALLOWED_FIELDS = {
     "open",
@@ -23,6 +25,7 @@ ALLOWED_FIELDS = {
 @dataclass(frozen=True, slots=True)
 class RunConfig:
     raw: dict[str, Any]
+    source_bytes: bytes
     strategy_id: str
     spec_revision: str
     base_url: str
@@ -41,8 +44,9 @@ class RunConfig:
     @classmethod
     def load(cls, path: Path) -> RunConfig:
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            source_bytes = path.read_bytes()
+            raw = json.loads(source_bytes.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"cannot load run config {path}: {exc}") from exc
         if not isinstance(raw, dict):
             raise ValueError("run config must be a JSON object")
@@ -57,6 +61,7 @@ class RunConfig:
         fields = tuple(str(field) for field in raw.get("fields", []))
         config = cls(
             raw=raw,
+            source_bytes=source_bytes,
             strategy_id=_required_string(raw, "strategy_id"),
             spec_revision=_required_string(raw, "spec_revision"),
             base_url=str(market_hub.get("base_url", "http://yosef-server:8803")).rstrip("/"),
@@ -112,6 +117,11 @@ class RunConfig:
                 "top_k": self.top_k,
             },
         }
+
+    @property
+    def config_hash(self) -> str:
+        """SHA-256 of the exact supplied config file bytes."""
+        return sha256_bytes(self.source_bytes)
 
 
 def _object(raw: dict[str, Any], name: str) -> dict[str, Any]:

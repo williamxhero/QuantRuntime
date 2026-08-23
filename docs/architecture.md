@@ -24,6 +24,14 @@ suspended rows are excluded. The SHA-256 of the canonical JSON envelope is
 published as `manifest.metrics.reference_decision_hash`. No fills, positions,
 fees, or future-return labels enter this contract.
 
+## Configuration identity
+
+The manifest's `config_hash` is the SHA-256 of the exact bytes supplied through
+`--config`. Whitespace, key order, encoding bytes, or a trailing newline are
+therefore identity-bearing even when two files parse to the same JSON object.
+Successful and failed manifests, as well as `run_id`, use this same byte hash.
+`strategy_spec_hash` remains a separate canonical-JSON semantic hash.
+
 MarketHub data is never written as a reusable local data copy. Qlib evaluation
 exports contain only signals, labels, IC series, candidates, and summary
 metrics. The production dependency direction ends at Qlib and MarketHub; this
