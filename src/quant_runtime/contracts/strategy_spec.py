@@ -21,6 +21,30 @@ class StrategySpec:
     price_adjustment: str
 
     @classmethod
+    def from_parameters(
+        cls,
+        strategy_id: str,
+        revision: int,
+        parameters: dict[str, Any],
+    ) -> StrategySpec:
+        spec = cls(
+            strategy_id=(
+                "cross-sectional-momentum-topk"
+                if strategy_id == "equity.cross-sectional-momentum-topk"
+                else strategy_id
+            ),
+            revision=str(revision),
+            lookback_days=int(parameters.get("lookback_days", 0)),
+            top_k=int(parameters.get("top_k", 0)),
+            rebalance_frequency=str(parameters.get("rebalance_frequency", "")),
+            signal_timing=str(parameters.get("signal_timing", "")),
+            execution_timing=str(parameters.get("execution_timing", "")),
+            price_adjustment=str(parameters.get("price_adjustment", "")),
+        )
+        spec.validate()
+        return spec
+
+    @classmethod
     def load(cls, path: Path) -> StrategySpec:
         raw = read_json(path)
         if raw.get("schema") != STRATEGY_SCHEMA:

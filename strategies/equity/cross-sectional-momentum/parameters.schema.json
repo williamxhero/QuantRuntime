@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Cross-sectional momentum parameters",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["lookback_days", "top_k", "rebalance_frequency", "signal_timing", "execution_timing", "price_adjustment"],
+  "properties": {
+    "lookback_days": {"type": "integer", "minimum": 1, "default": 3},
+    "top_k": {"type": "integer", "minimum": 1, "default": 1},
+    "rebalance_frequency": {"const": "daily", "default": "daily"},
+    "signal_timing": {"const": "close", "default": "close"},
+    "execution_timing": {"const": "next_open", "default": "next_open"},
+    "price_adjustment": {"const": "none", "default": "none"}
+  }
+}

@@ -11,6 +11,7 @@
     "revision": {"type": "integer", "minimum": 1},
     "display_name": {"type": "string", "minLength": 1},
     "parameter_schema": {"type": "string", "minLength": 1},
+    "assets": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
     "pipeline": {
       "type": "object",
       "additionalProperties": false,

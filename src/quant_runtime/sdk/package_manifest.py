@@ -44,10 +44,7 @@ class StrategyPackage:
         return {str(key): str(item) for key, item in value.items()}
 
     def resolve_parameters(self, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
-        unknown = set(overrides or ()) - set(self.default_parameters)
-        if unknown:
-            raise ValueError(f"unknown strategy parameters: {sorted(unknown)}")
-        resolved = {**self.default_parameters, **(overrides or {})}
+        resolved = dict(self.default_parameters if overrides is None else overrides)
         _validate_parameters(self.parameter_schema, resolved)
         return resolved
 
@@ -93,7 +90,7 @@ def validate_package(path: Path) -> StrategyPackage:
         manifest=manifest,
         parameter_schema=parameter_schema,
         default_parameters=defaults,
-        package_hash=_package_hash(root),
+        package_hash=_package_hash(root, manifest),
     )
 
 
@@ -136,13 +133,14 @@ def _contained_file(root: Path, relative: str) -> Path:
     return path
 
 
-def _package_hash(root: Path) -> str:
+def _package_hash(root: Path, manifest: dict[str, Any]) -> str:
     digest = sha256()
-    files = sorted(
-        path for path in root.rglob("*") if path.is_file() and "__pycache__" not in path.parts
-    )
-    if not files:
-        raise ValueError("strategy package is empty")
+    relative_files = {"strategy.toml", str(manifest["parameter_schema"])}
+    for role in ("discovery", "formal"):
+        for entrypoint in manifest.get("implementations", {}).get(role, {}).values():
+            relative_files.add(str(entrypoint).partition(":")[0])
+    relative_files.update(str(item) for item in manifest.get("assets", []))
+    files = sorted(_contained_file(root, relative) for relative in relative_files)
     for path in files:
         relative = path.relative_to(root).as_posix().encode("utf-8")
         payload = path.read_bytes()

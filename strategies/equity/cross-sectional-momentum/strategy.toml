@@ -1,0 +1,39 @@
+schema = "quant-research.strategy-package.v1"
+strategy_id = "equity.cross-sectional-momentum-topk"
+revision = 1
+display_name = "A股横截面动量 Top-K"
+parameter_schema = "parameters.schema.json"
+
+[pipeline]
+discovery = "optional"
+formal = "required"
+
+[requirements]
+asset_classes = ["equity"]
+frequencies = ["1d"]
+capabilities = [
+  "data.bar.1d",
+  "decision.target_weight",
+  "evidence.engine_native",
+  "market.cn.equity",
+  "market.cn.equity.board_lot",
+  "market.cn.equity.price_limit",
+  "market.cn.equity.suspension",
+  "market.cn.equity.t_plus_one",
+  "order.market",
+  "portfolio.multi_instrument",
+  "run.backtest"
+]
+decision_intents = ["target_weight"]
+
+[implementations.discovery]
+qlib = "discovery/qlib/pipeline.py:discover"
+
+[implementations.formal]
+nautilus = "formal/nautilus/strategy.py:MomentumTopKStrategy"
+
+[dependencies]
+markethub_contract = "v2"
+calendar = "cn-equity-v1"
+qlib_api = "0.9.7"
+nautilus_api = "1.231.0"

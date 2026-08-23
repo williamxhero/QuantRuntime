@@ -201,6 +201,8 @@ def run_engine(
     dataset: CanonicalDataset,
     config: FormalConfig,
     output: Path,
+    *,
+    strategy_class=MomentumTopKStrategy,
 ) -> FormalOutput:
     dataset.validate()
     output.mkdir(parents=True, exist_ok=True)
@@ -238,7 +240,7 @@ def run_engine(
             engine.add_data(bars, sort=False)
         engine.sort_data()
         injection_seconds = perf_counter() - inject_started
-        strategy = MomentumTopKStrategy(
+        strategy = strategy_class(
             config.strategy,
             config.fees,
             config.lot_size,
