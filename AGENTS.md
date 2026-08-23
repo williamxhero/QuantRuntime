@@ -10,8 +10,10 @@
   runtime paths. Do not create framework-specific copies of those contracts.
 - Formal strategies must calculate signals from bars observed by the Nautilus runtime. Never feed
   Qlib target positions or future decision rows into the formal engine.
-- Runtime output may contain evidence and hashes but must never persist raw market bars or a
-  reusable local data cache.
+- `reference` snapshots with `local_cache = "none"` are the default and must not persist raw bars.
+  Explicit `materialized` snapshots are immutable and content-addressed; explicit persistent caches
+  are allowed but remain non-authoritative and replaceable. Never commit `.runtime/`, `runtime/`, or
+  build output.
 - Keep A-share policy in public Nautilus seams: instruments, strategy guards, and fee model. Do not
   fork or patch Nautilus core.
 - Preserve Qlib native evaluation exports and Nautilus native lifecycle, fills, account, position,

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +19,8 @@ from quant_runtime.contracts.canonical_hash import (
     write_json,
 )
 from quant_runtime.market_data.markethub.client import MarketHubClient, MarketHubContractError
-from quant_runtime.market_data.markethub.daily_data import CanonicalDataset
+from quant_runtime.market_data.markethub.catalog import CanonicalInstrument
+from quant_runtime.market_data.markethub.daily_data import CanonicalBar, CanonicalDataset
 from quant_runtime.sdk.snapshot_contract import (
     SnapshotRequest,
     validate_snapshot_manifest,
@@ -141,15 +144,19 @@ class MarketHubDataAdapter:
         reference_identity = {**request.identity_payload(), "source": source}
         reference_id = f"sha256:{sha256_value(reference_identity)}"
         publication = self._publication_source or HttpPublicationSource(request.base_url)
-        declared = publication.list_partitions(request)
+        declared = publication.list_partitions(
+            request,
+            market_data_version=verification.dataset.data_version,
+            dataset_version=verification.dataset.dataset_version,
+        )
         _validate_partition_catalog(declared, request)
         with AtomicDirectory(layout.staging) as staging:
             metadata = self._write_metadata(staging.path, verification)
             partition_records = []
-            for item in sorted(declared, key=lambda value: value.month):
+            for item in sorted(declared, key=lambda value: (value.month, value.kind)):
                 payload = publication.download(item)
                 _verify_partition(item, payload)
-                relative = Path("bars") / f"month={item.month}" / "part-000.parquet"
+                relative = Path(item.path)
                 target = staging.path / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(payload)
@@ -159,6 +166,8 @@ class MarketHubDataAdapter:
                         "sha256": item.sha256,
                         "content_bytes": item.content_bytes,
                         "month": item.month,
+                        "kind": item.kind,
+                        "rows": item.rows,
                     }
                 )
             identity = {
@@ -168,6 +177,15 @@ class MarketHubDataAdapter:
                 "calendar": metadata["calendar"],
                 "coverage": metadata["coverage"],
             }
+            local_dataset = _load_materialized_dataset(
+                staging.path,
+                source=source,
+                query=request.identity_payload()["query"],
+                catalog=metadata["catalog"],
+                calendar=metadata["calendar"],
+                partitions=partition_records,
+            )
+            identity["canonical_input_hash"] = local_dataset.input_hash
             snapshot_id = f"sha256:{sha256_value(identity)}"
             manifest = {
                 "schema": "quant-research.market-snapshot.v1",
@@ -180,6 +198,7 @@ class MarketHubDataAdapter:
                 "catalog": metadata["catalog"],
                 "coverage": metadata["coverage"],
                 "partitions": partition_records,
+                "canonical_input_hash": local_dataset.input_hash,
                 "resolved_at": _now(),
             }
             validate_snapshot_manifest(manifest)
@@ -190,16 +209,24 @@ class MarketHubDataAdapter:
                 validate_snapshot_manifest(existing)
                 if existing["snapshot_id"] != snapshot_id:
                     raise MarketHubContractError("snapshot identity collision")
+                existing_dataset = _load_materialized_dataset(
+                    final,
+                    source=existing["source"],
+                    query=existing["query"],
+                    catalog=existing["catalog"],
+                    calendar=existing["calendar"],
+                    partitions=existing["partitions"],
+                )
                 return ResolvedSnapshot(
                     existing,
                     (final / "manifest.json").resolve(),
-                    verification.dataset,
+                    existing_dataset,
                 )
             published = staging.publish(final)
             return ResolvedSnapshot(
                 manifest,
                 (published / "manifest.json").resolve(),
-                verification.dataset,
+                local_dataset,
             )
 
     def _source(
@@ -262,13 +289,23 @@ def _validate_partition_catalog(
     request: SnapshotRequest,
 ) -> None:
     expected = _months(request)
-    actual = tuple(item.month for item in sorted(partitions, key=lambda item: item.month))
-    if actual != expected:
+    actual = tuple(
+        (item.month, item.kind)
+        for item in sorted(partitions, key=lambda item: (item.month, item.kind))
+    )
+    expected_files = tuple((month, kind) for month in expected for kind in ("bars", "coverage"))
+    if actual != expected_files:
         raise MarketHubContractError(
-            f"published Parquet months do not cover request: expected={expected}, actual={actual}"
+            "published Parquet files do not cover requested bars and coverage: "
+            f"expected={expected_files}, actual={actual}"
         )
     if any(
-        item.content_bytes < 1 or len(item.sha256) != 64 or not item.download_url or not item.path
+        item.content_bytes < 1
+        or item.rows < 0
+        or item.kind not in {"bars", "coverage"}
+        or len(item.sha256) != 64
+        or not item.download_url
+        or item.path != f"year={item.month[:4]}/month={item.month[5:]}/{item.kind}.parquet"
         for item in partitions
     ):
         raise MarketHubContractError("published Parquet catalog has incomplete integrity fields")
@@ -286,11 +323,182 @@ def _verify_partition(partition: PublishedPartition, payload: bytes) -> None:
             f"published Parquet sha256 mismatch for {partition.month}: {digest}"
         )
     try:
-        pq.read_schema(pa.BufferReader(payload))
+        schema = pq.read_schema(pa.BufferReader(payload))
+        metadata = pq.read_metadata(pa.BufferReader(payload))
     except Exception as exc:
         raise MarketHubContractError(
             f"published partition {partition.month} is not valid Parquet: {exc}"
         ) from exc
+    required = (
+        {
+            "market",
+            "code",
+            "trade_date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "is_suspended",
+            "is_st",
+            "pre_close",
+        }
+        if partition.kind == "bars"
+        else {"market", "code", "expected_rows", "actual_rows", "missing_rows", "complete"}
+    )
+    if not required <= set(schema.names):
+        raise MarketHubContractError(
+            f"published {partition.kind} schema lacks required columns: "
+            f"{sorted(required - set(schema.names))}"
+        )
+    schema_version = (schema.metadata or {}).get(b"schema_version", b"").decode()
+    if schema_version != "markethub-stock-daily-parquet-v1":
+        raise MarketHubContractError(
+            f"published {partition.kind} schema_version is invalid: {schema_version!r}"
+        )
+    if metadata.num_rows != partition.rows:
+        raise MarketHubContractError(
+            f"published {partition.kind} row count mismatch: "
+            f"{metadata.num_rows} != {partition.rows}"
+        )
+
+
+def _load_materialized_dataset(
+    root: Path,
+    *,
+    source: dict[str, Any],
+    query: dict[str, Any],
+    catalog: dict[str, Any],
+    calendar: dict[str, Any],
+    partitions: list[dict[str, Any]],
+) -> CanonicalDataset:
+    catalog_rows = _read_verified_json_array(root, catalog)
+    calendar_rows = _read_verified_json_array(root, calendar)
+    instruments = tuple(_instrument_from_record(item) for item in catalog_rows)
+    instrument_by_code = {item.raw_code: item for item in instruments}
+    requested_codes = set(instrument_by_code)
+    start = date.fromisoformat(str(query["start"]))
+    end = date.fromisoformat(str(query["end"]))
+    bar_rows: list[dict[str, Any]] = []
+    coverage_keys: set[tuple[str, str]] = set()
+    for record in partitions:
+        path = _verified_path(root, record)
+        table = pq.read_table(path)
+        if len(table) != int(record["rows"]):
+            raise MarketHubContractError(f"materialized row count changed: {record['path']}")
+        if record["kind"] == "coverage":
+            for row in table.to_pylist():
+                code = str(row.get("code", ""))
+                if code not in requested_codes:
+                    continue
+                if (
+                    row.get("complete") is not True
+                    or int(row.get("missing_rows", -1)) != 0
+                    or int(row.get("expected_rows", -1)) != int(row.get("actual_rows", -2))
+                ):
+                    raise MarketHubContractError(
+                        f"materialized coverage is incomplete: {record['month']}/{code}"
+                    )
+                coverage_keys.add((str(record["month"]), code))
+            continue
+        for row in table.to_pylist():
+            code = str(row.get("code", ""))
+            trading_day = row.get("trade_date")
+            if code not in requested_codes or not isinstance(trading_day, date):
+                continue
+            if start <= trading_day <= end:
+                bar_rows.append({**row, "trade_time": trading_day.isoformat()})
+    expected_coverage = {
+        (month, code) for month in _months_from_query(query) for code in requested_codes
+    }
+    if coverage_keys != expected_coverage:
+        raise MarketHubContractError(
+            "materialized coverage does not contain every requested instrument-month"
+        )
+    try:
+        bars = tuple(
+            sorted(
+                (CanonicalBar.from_markethub(row, instrument_by_code) for row in bar_rows),
+                key=lambda item: item.identity,
+            )
+        )
+    except (KeyError, ValueError) as exc:
+        raise MarketHubContractError(f"invalid materialized daily bars: {exc}") from exc
+    revision = str(source.get("data_revision", ""))
+    data_version, separator, dataset_version = revision.partition(":")
+    if not separator:
+        raise MarketHubContractError("materialized snapshot source revision is invalid")
+    dataset = CanonicalDataset(
+        data_version=data_version,
+        dataset_version=dataset_version,
+        timezone="Asia/Shanghai",
+        instruments=instruments,
+        trading_days=tuple(date.fromisoformat(str(item)) for item in calendar_rows),
+        bars=bars,
+    )
+    try:
+        dataset.validate()
+    except ValueError as exc:
+        raise MarketHubContractError(f"materialized dataset validation failed: {exc}") from exc
+    return dataset
+
+
+def _read_verified_json_array(root: Path, record: dict[str, Any]) -> list[Any]:
+    path = _verified_path(root, record)
+    try:
+        value = json.loads(path.read_bytes())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MarketHubContractError(f"materialized metadata is invalid: {path}") from exc
+    if not isinstance(value, list):
+        raise MarketHubContractError(f"materialized metadata must be an array: {path}")
+    return value
+
+
+def _verified_path(root: Path, record: dict[str, Any]) -> Path:
+    path = (root / str(record["path"])).resolve()
+    try:
+        path.relative_to(root.resolve())
+    except ValueError as exc:
+        raise MarketHubContractError(
+            f"materialized file escapes snapshot: {record['path']}"
+        ) from exc
+    payload = path.read_bytes()
+    if len(payload) != int(record["content_bytes"]) or sha256_bytes(payload) != record["sha256"]:
+        raise MarketHubContractError(f"materialized file integrity mismatch: {record['path']}")
+    return path
+
+
+def _instrument_from_record(value: Any) -> CanonicalInstrument:
+    if not isinstance(value, dict):
+        raise MarketHubContractError("materialized catalog item must be an object")
+    return CanonicalInstrument(
+        instrument=str(value["instrument"]),
+        raw_code=str(value["raw_code"]),
+        exchange=str(value["exchange"]),
+        currency=str(value["currency"]),
+        price_precision=int(value["price_precision"]),
+        tick_size=Decimal(str(value["tick_size"])),
+        lot_size=int(value["lot_size"]),
+        list_date=date.fromisoformat(value["list_date"]) if value.get("list_date") else None,
+        delist_date=(
+            date.fromisoformat(value["delist_date"]) if value.get("delist_date") else None
+        ),
+        is_st=bool(value.get("is_st", False)),
+    )
+
+
+def _months_from_query(query: dict[str, Any]) -> tuple[str, ...]:
+    start = date.fromisoformat(str(query["start"]))
+    end = date.fromisoformat(str(query["end"]))
+    year, month = start.year, start.month
+    result = []
+    while (year, month) <= (end.year, end.month):
+        result.append(f"{year:04d}-{month:02d}")
+        month += 1
+        if month == 13:
+            year, month = year + 1, 1
+    return tuple(result)
 
 
 def _months(request: SnapshotRequest) -> tuple[str, ...]:

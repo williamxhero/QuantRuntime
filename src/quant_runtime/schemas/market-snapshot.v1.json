@@ -4,7 +4,7 @@
   "title": "Materialized Market Snapshot v1",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema", "snapshot_id", "mode", "source_snapshot_ref", "source", "query", "calendar", "catalog", "coverage", "partitions", "resolved_at"],
+  "required": ["schema", "snapshot_id", "mode", "source_snapshot_ref", "source", "query", "calendar", "catalog", "coverage", "partitions", "canonical_input_hash", "resolved_at"],
   "properties": {
     "schema": {"const": "quant-research.market-snapshot.v1"},
     "snapshot_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
@@ -19,13 +19,15 @@
       "type": "array", "minItems": 1,
       "items": {
         "type": "object", "additionalProperties": false,
-        "required": ["path", "sha256", "content_bytes", "month"],
+        "required": ["path", "sha256", "content_bytes", "month", "kind", "rows"],
         "properties": {
           "path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "content_bytes": {"type": "integer", "minimum": 0}, "month": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}$"}
+          "content_bytes": {"type": "integer", "minimum": 0}, "month": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}$"},
+          "kind": {"enum": ["bars", "coverage"]}, "rows": {"type": "integer", "minimum": 0}
         }
       }
     },
+    "canonical_input_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "resolved_at": {"type": "string", "format": "date-time"}
   }
 }

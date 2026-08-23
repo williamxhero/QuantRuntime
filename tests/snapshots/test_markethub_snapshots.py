@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
+from datetime import date
 from hashlib import sha256
 from pathlib import Path
 
+import httpx
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from conftest import FixtureTransport
 
 from quant_runtime.adapters.data.markethub import MarketHubDataAdapter, PublishedPartition
+from quant_runtime.adapters.data.markethub.publication import HttpPublicationSource
+from quant_runtime.contracts.canonical_hash import sha256_bytes
 from quant_runtime.market_data.markethub.client import MarketHubClient, MarketHubContractError
 from quant_runtime.sdk.snapshot_contract import SnapshotRequest
 from quant_runtime.workspace.layout import RuntimeLayout
@@ -42,32 +47,73 @@ def client_factory(s_fixture):
     return lambda _: MarketHubClient(transport=FixtureTransport(s_fixture))
 
 
-def parquet_bytes() -> bytes:
+def parquet_bytes(kind: str) -> bytes:
     sink = pa.BufferOutputStream()
-    pq.write_table(
-        pa.table({"trade_time": ["2025-01-02"], "code": ["600000"], "close": [10.0]}),
-        sink,
-    )
+    if kind == "bars":
+        table = pa.table(
+            {
+                "market": ["SHSE", "SZSE"],
+                "code": ["600000", "000001"],
+                "trade_date": [date(2025, 1, 2), date(2025, 1, 2)],
+                "open": [20.0, 10.0],
+                "high": [20.2, 10.2],
+                "low": [19.8, 9.8],
+                "close": [20.1, 10.1],
+                "volume": [1000.0, 1000.0],
+                "amount": [20100.0, 10100.0],
+                "is_suspended": [False, False],
+                "is_st": [False, False],
+                "pre_close": [20.0, 10.0],
+            }
+        )
+    else:
+        table = pa.table(
+            {
+                "market": ["SHSE", "SZSE"],
+                "code": ["600000", "000001"],
+                "expected_rows": [1, 1],
+                "actual_rows": [1, 1],
+                "missing_rows": [0, 0],
+                "complete": [True, True],
+            }
+        )
+    table = table.replace_schema_metadata({b"schema_version": b"markethub-stock-daily-parquet-v1"})
+    pq.write_table(table, sink)
     return sink.getvalue().to_pybytes()
 
 
 class PublicationFixture:
-    def __init__(self, payload: bytes, *, digest: str | None = None) -> None:
-        self.payload = payload
-        self.partition = PublishedPartition(
-            month="2025-01",
-            path="published/2025-01.parquet",
-            content_bytes=len(payload),
-            sha256=digest or sha256(payload).hexdigest(),
-            download_url="fixture://2025-01",
+    def __init__(self, *, digest: str | None = None) -> None:
+        self.payloads = {kind: parquet_bytes(kind) for kind in ("bars", "coverage")}
+        self.partitions = tuple(
+            PublishedPartition(
+                month="2025-01",
+                kind=kind,
+                path=f"year=2025/month=01/{kind}.parquet",
+                rows=2,
+                content_bytes=len(self.payloads[kind]),
+                sha256=(
+                    digest if kind == "bars" and digest else sha256(self.payloads[kind]).hexdigest()
+                ),
+                download_url=f"fixture://2025-01/{kind}",
+            )
+            for kind in ("bars", "coverage")
         )
 
-    def list_partitions(self, snapshot_request):
-        return (self.partition,)
+    def list_partitions(
+        self,
+        snapshot_request,
+        *,
+        market_data_version,
+        dataset_version,
+    ):
+        assert market_data_version == "fixture-global-v1"
+        assert dataset_version == "fixture-daily-v1"
+        return self.partitions
 
     def download(self, partition):
-        assert partition == self.partition
-        return self.payload
+        assert partition in self.partitions
+        return self.payloads[partition.kind]
 
 
 def test_reference_defaults_to_assumed_without_read_and_cache_is_not_identity(
@@ -100,18 +146,23 @@ def test_materialized_preserves_and_verifies_published_parquet_bytes(
     s_fixture,
     tmp_path: Path,
 ) -> None:
-    payload = parquet_bytes()
+    publication = PublicationFixture()
     adapter = MarketHubDataAdapter(
         client_factory=client_factory(s_fixture),
-        publication_source=PublicationFixture(payload),
+        publication_source=publication,
     )
     layout = RuntimeLayout.create(tmp_path / ".runtime")
     snapshot = adapter.resolve(request(snapshot_mode="materialized"), layout)
-    partition = snapshot.manifest["partitions"][0]
-    published = snapshot.manifest_path.parent / partition["path"]
-    assert published.read_bytes() == payload
-    assert partition["content_bytes"] == len(payload)
-    assert partition["sha256"] == sha256(payload).hexdigest()
+    assert {item["kind"] for item in snapshot.manifest["partitions"]} == {
+        "bars",
+        "coverage",
+    }
+    for partition in snapshot.manifest["partitions"]:
+        published = snapshot.manifest_path.parent / partition["path"]
+        payload = publication.payloads[partition["kind"]]
+        assert published.read_bytes() == payload
+        assert partition["content_bytes"] == len(payload)
+        assert partition["sha256"] == sha256(payload).hexdigest()
     assert all(name in snapshot.manifest for name in ("catalog", "calendar", "coverage"))
     assert list(layout.staging.iterdir()) == []
 
@@ -122,10 +173,45 @@ def test_materialized_hash_mismatch_fails_closed_and_cleans_staging(
 ) -> None:
     adapter = MarketHubDataAdapter(
         client_factory=client_factory(s_fixture),
-        publication_source=PublicationFixture(parquet_bytes(), digest="0" * 64),
+        publication_source=PublicationFixture(digest="0" * 64),
     )
     layout = RuntimeLayout.create(tmp_path / ".runtime")
     with pytest.raises(MarketHubContractError, match="sha256 mismatch"):
         adapter.resolve(request(snapshot_mode="materialized"), layout)
     assert list(layout.snapshots.iterdir()) == []
     assert list(layout.staging.iterdir()) == []
+
+
+def test_http_publication_source_matches_real_export_manifest_contract() -> None:
+    manifest_bytes = (
+        Path(__file__).parents[1] / "fixtures" / "markethub_stock_daily_export_manifest.json"
+    ).read_bytes()
+    manifest = json.loads(manifest_bytes)
+    mapping = {
+        "dataset_id": "stock_daily_1d",
+        "market_data_version": manifest["market_data_version"],
+        "dataset_version": manifest["dataset_version"],
+        "manifest_sha256": sha256_bytes(manifest_bytes),
+        "manifest_url": (f"/api/exports/stock_daily_1d/{manifest['dataset_version']}/manifest"),
+    }
+
+    def handle(http_request: httpx.Request) -> httpx.Response:
+        if "/resolve/" in http_request.url.path:
+            return httpx.Response(200, json=mapping)
+        if http_request.url.path.endswith("/manifest"):
+            return httpx.Response(200, content=manifest_bytes)
+        raise AssertionError(http_request.url)
+
+    source = HttpPublicationSource(
+        "http://fixture",
+        transport=httpx.MockTransport(handle),
+    )
+    files = source.list_partitions(
+        request(),
+        market_data_version=manifest["market_data_version"],
+        dataset_version=manifest["dataset_version"],
+    )
+    assert [(item.kind, item.content_bytes) for item in files] == [
+        ("bars", 3471835),
+        ("coverage", 22234),
+    ]
