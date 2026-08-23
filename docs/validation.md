@@ -1,39 +1,36 @@
 # Validation evidence and limits
 
-The current reproducible S configurations live at
-`configs/discovery/qlib/s-momentum.json` and `configs/formal/nautilus/s-momentum.json`. The connected
-gate exercises the Qlib adapter, the default formal runtime registry selection, the Nautilus native
-engine, and the neutral manifest/golden contracts against the live MarketHub service.
+Offline verification is authoritative for repository behavior. It covers JSON Schema/package
+contracts, parameter and package hashes, real MarketHub export-manifest shape, reference drift,
+materialized byte/hash/coverage integrity, atomic cleanup, all cache policies and actual cache
+consumption, capability routing, formal-only and discovery+formal topology, post-formal comparison,
+legacy commands/manifests, connected test definitions, and scale/determinism checks.
 
-On 2026-08-23 three complete live two-stock workflows ran over January 2025 MarketHub data. Every
-workflow completed `discover`, `evaluate`, and `golden-check` with stable identities:
+The captured export fixture matches the real `stock_daily_1d` manifest contract:
+`schema_version`, dataset/data versions, range, compression, partition count, and
+`files[{path,url,rows,bytes,sha256}]` with `year=YYYY/month=MM/{bars,coverage}.parquet` paths. Fixture
+Parquet payloads are generated only for offline contract tests; production materialization always
+uses and verifies MarketHub's original bytes.
 
-- candidate run: `qr-discover-7babb21175b6d1e51b1bbb58`;
-- formal run: `qr-formal-a9ea3b53125454629aa55040`;
-- MarketHub data version:
-  `mhf-v1-2a6b9abd5e6daa9374bdc8d97b4644ad3cecb1d82a597418d740c20f14a7fc3d`;
-- daily dataset version:
-  `mhd-v1-66f21b5a0b568b996d906d2df2e3a908f5877a7612bcd60046b1b6b19bcf6de1`;
-- strategy spec hash:
-  `7d291af79d6611bf9d1852c9a3b46af497a95de439cb44f3251ba0b56c2b0b91`;
-- canonical input hash:
-  `d9c344dffcb2393042661adf39d1c4e4e1c9804abc82f3ce0ddbd9c1c853dfb0`;
-- Qlib candidate and Nautilus runtime decision hash:
-  `2f49985541decc84ecf2fc894009e7d09ee832da8e9350bd865bed08283cd8f4`;
-- normalized formal output hash:
-  `754795064ec1960a155048428f8b5a6ba1c3de663967d7f832fa0a2b308b6ead`.
+Connected tests remain fail-closed and are run separately with `pytest -m connected`. As of
+2026-08-24, live MarketHub health is reachable, but the newest rapidly changing `stock_daily_1d`
+dataset reports publication/read-model state `not_ready`. Consequently the live daily read and the
+new workspace connected path are externally blocked. Tests are not skipped and fixtures are not
+substituted; the failure is retained as operational evidence rather than claimed as a pass.
 
-Each run produced 15 candidate/runtime decisions, five Nautilus orders, five fills, and
-`metrics.semantic_match=true`. Engine time was 0.0215-0.0258 seconds and post-run RSS was about
-306-307 MB.
+Historical connected validation from 2026-08-23 remains evidence only for its exact versions: Qlib
+discovery and Nautilus formal evaluation completed with matching decision and canonical input hashes.
+It does not prove readiness of the current MarketHub dataset vector.
 
-The S workflow is a contract and integration gate, not an M/L scale benchmark. Native Nautilus
-CSV files can contain upstream-generated event UUIDs, so semantic determinism is established by
-the canonical identities and normalized output rather than requiring native report bytes to match.
-The pinned Qlib dependency also emits an upstream Gym deprecation notice under NumPy 2; it does not
-change command exit status or the final machine-readable JSON line.
+Run the complete local gate with:
 
-The validation identities above remain historical evidence for the exact configuration bytes used
-by those runs. Moving the configuration files under framework-specific directories required changing
-their relative `strategy_spec` paths, so a new run receives new config hashes and run IDs by design;
-the canonical strategy, data, decision, manifest schema, and hash algorithms are unchanged.
+```powershell
+uv run ruff format --check .
+uv run ruff check .
+uv run pytest -m "not connected"
+uv run pytest -m connected
+uv build
+git diff --check
+```
+
+The project has no mypy configuration or mypy dependency, so no type-check command is asserted.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,7 @@ from quant_runtime.contracts.formal_manifest import FormalManifest
 from quant_runtime.discovery.qlib.candidate_manifest import write_candidate_run
 from quant_runtime.discovery.qlib.workflow import DiscoveryConfig, run_discovery
 from quant_runtime.formal.nautilus.runner import FormalConfig, run_engine
+from quant_runtime.workspace import StrategyWorkspace
 
 ROOT = Path(__file__).parents[2]
 
@@ -50,3 +52,17 @@ def test_live_formal_runtime_is_deterministic(tmp_path: Path) -> None:
     assert len({item.output_hash for item in outputs}) == 1
     assert outputs[0].decision_hash
     assert all(len(item.fills) == 5 for item in outputs)
+
+
+@pytest.mark.connected
+def test_live_strategy_workspace_reference_run(tmp_path: Path) -> None:
+    request_path = ROOT / "configs" / "workspace" / "s-momentum.json"
+    request = json.loads(request_path.read_text(encoding="utf-8"))
+    manifest, path = StrategyWorkspace(tmp_path / ".runtime").run(
+        request,
+        request_root=request_path.parent,
+    )
+    assert manifest["status"] == "completed"
+    assert manifest["snapshot"]["snapshot_mode"] == "reference"
+    assert manifest["topology"]["formal_backends"] == ["nautilus"]
+    assert path.is_file()

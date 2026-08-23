@@ -1,79 +1,40 @@
-# Public manifests
+# Contracts
 
-These manifests are neutral process-boundary contracts. Apex Research is one possible external
-consumer, not a dependency or namespace owner; another research control plane can replace it, and
-multiple consumers can independently verify the same artifacts. Selecting `evaluate --runtime`
-changes the formal adapter only and does not change the manifest schema or CLI stdout shape.
+All new contracts are bundled Draft 2020-12 JSON Schemas under `quant_runtime.schemas`:
 
-## Candidate
+| Schema | Purpose |
+|---|---|
+| `strategy-package.v1` | package identity, requirements, policy, and implementation entrypoints |
+| `runtime-capability.v1` | exact adapter/engine versions and supported capabilities |
+| `market-snapshot-ref.v1` | frozen logical MarketHub reference and trust policy |
+| `market-snapshot.v1` | immutable materialized files and canonical input identity |
+| `workspace-run-request.v1` | package, complete parameters, data, discovery, and formal topology |
+| `run-manifest.v1` | complete run lineage and artifact integrity records |
+| `result.v1` | canonical formal results, comparison, warnings, and incomparable items |
+| `decision-intents.v2` | versioned neutral intent envelope for future cross-layer exchange |
 
-```json
-{
-  "schema": "quant-runtime.candidate-manifest.v1",
-  "run_id": "qr-discover-...",
-  "framework": "Qlib",
-  "framework_version": "0.9.7",
-  "status": "passed",
-  "data_version": "...",
-  "dataset_version": "...",
-  "config_hash": "sha256 of exact discovery config bytes",
-  "strategy_spec_hash": "sha256 of canonical strategy spec",
-  "canonical_input_hash": "sha256 of shared canonical MarketHub dataset",
-  "artifacts": [
-    {"relative_path": "...", "sha256": "...", "content_bytes": 123}
-  ],
-  "metrics": {
-    "reference_decision_hash": "sha256 of canonical decision envelope",
-    "framework_version": "0.9.7",
-    "observation_count": 28,
-    "signal_days": 15,
-    "candidate_rows": 15,
-    "mean_rank_ic": 0.0,
-    "quick_gate_passed": true,
-    "fetch": {}
-  }
-}
-```
+The first package is `strategies/equity/cross-sectional-momentum`. Its content hash covers the TOML
+manifest, parameter schema, declared discovery/formal implementation files, and explicitly declared
+assets only. Tests, runtime state, and unrelated files do not change package identity.
 
-The candidate artifacts include `strategy_spec.json`, `strategy_decisions.json`, Qlib signals,
-Rank IC, candidates, risk analysis, and a native-capability recorder export.
+Parameters follow one closed rule: no supplied object means the complete set of schema defaults;
+supplying an object means it must itself be the complete valid object. Partial user objects are not
+merged with defaults. Additional fields and missing fields are rejected.
 
-## Formal
+Snapshot identity excludes local cache policy because cache is replaceable, but includes normalized
+query semantics, endpoint contract, calendar and contract mapping, adapter version, trust policy, and
+the available MarketHub data/dataset revision. Materialized identity additionally binds every source
+file hash plus catalog, calendar, coverage, and canonical input hash.
 
-```json
-{
-  "schema": "quant-runtime.formal-manifest.v1",
-  "run_id": "qr-formal-...",
-  "framework": "NautilusTrader",
-  "framework_version": "1.231.0",
-  "status": "matched",
-  "data_version": "...",
-  "dataset_version": "...",
-  "config_hash": "sha256 of exact formal config bytes",
-  "strategy_spec_hash": "same canonical strategy hash",
-  "canonical_input_hash": "same canonical MarketHub dataset hash",
-  "normalized_output_hash": "sha256 of normalized formal semantics",
-  "candidate_run_id": "qr-discover-...",
-  "candidate_manifest_hash": "sha256 of exact candidate manifest bytes",
-  "artifacts": [
-    {"relative_path": "...", "sha256": "...", "content_bytes": 123}
-  ],
-  "metrics": {
-    "candidate_decision_hash": "...",
-    "formal_decision_hash": "...",
-    "semantic_match": true,
-    "data_version_match": true,
-    "dataset_version_match": true,
-    "strategy_spec_match": true,
-    "canonical_input_match": true,
-    "decision_match": true,
-    "fetch": {},
-    "runtime": {}
-  }
-}
-```
+Run identity binds all semantic inputs: package/parameter hashes, snapshot ID and source, full
+normalized request topology/configuration, cache policy/read method, and selected capability profile
+versions. Thus configuration or adapter/engine upgrades cannot reuse old evidence.
 
-The current formal artifacts are Nautilus native orders, fills, positions, account, statistics, the
-runtime decision envelope, and the normalized formal output. `semantic_match` is false if any
-lineage or decision identity differs. Future formal adapters must preserve these neutral identity
-fields while keeping their framework-native reports inside the adapter boundary.
+Formal inputs contain a package, complete parameters, resolved snapshot, output path, formal config,
+and cache conversion details. They contain no discovery candidate. Each formal result preserves both
+canonical positions/fills/account curve/metrics and engine-native evidence. Finite floating metrics
+are compared deterministically; NaN and infinity fail closed as incomparable values.
+
+The existing `quant-runtime.candidate-manifest.v1` and `quant-runtime.formal-manifest.v1` contracts
+remain available through the legacy commands. Workspace schemas do not reinterpret or silently
+migrate those artifacts.

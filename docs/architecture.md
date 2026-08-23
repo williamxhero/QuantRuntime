@@ -1,43 +1,66 @@
 # Architecture
 
+Quant Runtime evolves in place as a neutral Strategy Workspace. The repository and Python package
+names remain unchanged, and the legacy workflow remains a supported compatibility surface.
+
 ```text
-Research control planes (outside this repository)
-  -> neutral CLI + candidate/formal manifests
-     -> application/ use-case orchestration
-        -> market_data/markethub/ fail-closed canonical dataset
-           -> discovery/qlib/ signals, IC, risk, candidate manifest
-           -> formal/ FormalRuntime seam
-              -> formal/nautilus/ on_bar strategy, native execution, formal manifest
-        -> semantics/ golden comparison
+Strategy Package + complete parameters + MarketHub request
+                         |
+                  Strategy Workspace
+       validate_package / resolve_snapshot / run
+                         |
+             +-----------+-----------+
+             |                       |
+      Qlib discovery            Nautilus formal
+      (optional, lineage)       (sole state owner)
+             |                       |
+             +-----------+-----------+
+                         |
+          canonical result + native evidence
 ```
 
-`contracts/` owns canonical JSON/hash, the shared strategy specification, artifact integrity, and
-the two public manifests. `market_data/markethub/` owns the sole production HTTP client, the
-MarketHub anti-corruption boundary, and the canonical daily schema. It is not another MarketHub
-service. Neither framework defines a second data lineage.
+`sdk/` owns package, parameter, capability, snapshot, decision-intent, run, and result contracts.
+`workspace/` owns validation, deterministic routing, atomic publication, run identity, comparison,
+and evidence indexing. `adapters/` contains role-specific production integrations. The production
+registry declares exactly MarketHub for data, Qlib for discovery, and NautilusTrader for formal
+execution. Synthetic adapters exist only in tests.
 
-`application/` owns command-independent orchestration. `cli.py` only parses arguments, dispatches
-an application use case, prints the final JSON object, and returns its exit code. This keeps the
-public process boundary stable while framework adapters evolve.
+No formal backend is a hidden fallback. `pinned`, `capability_match`, `comparison`, and
+`agreement_gate` resolve against exact capability profiles. Matching ambiguity fails unless the
+request supplies a preference. Every formal backend in a comparison receives the same neutral
+snapshot and runs independently; comparison happens after formal execution and has no reference
+backend. Formal inputs deliberately cannot contain a Qlib candidate.
 
-`discovery/qlib/` converts the canonical dataset to an in-memory Qlib DataFrame, uses upstream Qlib
-Rank IC and risk analysis, and emits pre-matching decisions. `formal/interface.py` and
-`formal/registry.py` define the minimal engine selection seam; `formal/nautilus/` converts the same
-canonical schema into Nautilus instruments, quotes, and bars. The formal momentum strategy computes
-scores only from closes observed through `on_bar`; candidate decisions never enter its constructor.
-Formal execution models CNY tick/lot rules, T+1, suspension, listing lifecycle, price bands,
-minimum commission, sell stamp duty, per-fill rounding, and configurable bid/ask slippage through
-public Nautilus data, strategy-guard, and fee-model seams.
+## Data authority
 
-`semantics/` hashes and compares the neutral decision envelope. A formal run is semantically
-matched only when data version, strategy specification, canonical input, and decision hash agree.
-Nautilus remains the authority for orders, fills, positions, account, and statistics.
+MarketHub remains the sole production authority. A reference snapshot performs a metadata-only
+health read to freeze both MarketHub data and `stock_daily_1d` dataset versions. It reads no bars
+during resolution. `assumed_immutable` describes byte-level trust, not an unknown revision; a later
+bar read must match the frozen revision or fail. `verified_immutable` is emitted only after a full
+validated read.
 
-Manifest artifacts are content-addressed with `relative_path`, `sha256`, and `content_bytes`.
-Config identity is the SHA-256 of exact input file bytes. MarketHub raw bars are never persisted.
+A materialized snapshot uses the published export mapping and manifest. It downloads only requested
+months' original bars and coverage Parquet bytes, verifies manifest/file hashes, byte and row counts,
+schema, catalog, calendar, and coverage, then atomically publishes an immutable content-addressed
+snapshot. Staging is never authoritative.
 
-Research control planes are peer repositories outside Quant Runtime. They may replace Apex Research
-or run in parallel, but Quant Runtime never imports them. A future LEAN adapter belongs at
-`formal/lean/`, parallel to `formal/nautilus/`; it must preserve the neutral formal manifest and let
-LEAN own its native execution. The repository intentionally contains no fake LEAN implementation or
-duplicate matcher, order, fill, account, or statistics subsystem.
+Local cache policy is independent of snapshot authority. `none` writes no cache; `ephemeral` creates
+a verified canonical conversion under staging and removes it after the consumer returns;
+`persistent` stores a content-addressed verified conversion under `.runtime/cache`. The Nautilus
+adapter actually reconstructs and consumes non-`none` caches. Cache manifests record the source
+snapshot, canonical input hash, transform version, file hashes, and `authoritative: false`.
+
+## Identity and compatibility
+
+Workspace run identity binds the package and complete parameter hashes, frozen snapshot and source
+revision, normalized request semantics (including discovery config and cache policy), read method,
+and selected data/discovery/formal adapter and engine capability versions. Only output placement and
+runtime root are excluded. Artifacts use relative paths, SHA-256, and byte counts.
+
+The extracted momentum Strategy Package owns its Qlib and Nautilus entrypoints. The former core
+strategy import remains a compatibility shim. Legacy `discover`, `evaluate`, and `golden-check`
+commands and candidate/formal v1 manifests are unchanged.
+
+Apex Research is external and untouched. LEAN and ApexTrade are neither connected nor represented by
+empty production directories. Future adapters must enter through the same role contract only when a
+real, tested integration exists.
