@@ -1,0 +1,53 @@
+{
+  "schema": "quant-research.workspace-run-request.v1",
+  "package": "../../strategies/equity/cross-sectional-momentum",
+  "parameters": {
+    "lookback_days": 3,
+    "top_k": 1,
+    "rebalance_frequency": "daily",
+    "signal_timing": "close",
+    "execution_timing": "next_open",
+    "price_adjustment": "none"
+  },
+  "data": {
+    "adapter": "markethub",
+    "snapshot_mode": "reference",
+    "trust_policy": "assumed_immutable",
+    "local_cache": "none",
+    "endpoint_contract": "v2",
+    "base_url": "http://yosef-server:8803",
+    "query": {
+      "instruments": ["SH.600000", "SZ.000001"],
+      "start": "2025-01-01",
+      "end": "2025-01-31",
+      "frequency": "1d",
+      "adjustment": "none",
+      "calendar": "cn-equity-v1",
+      "contract_mapping": null
+    }
+  },
+  "discovery": {
+    "mode": "run",
+    "backend": "qlib"
+  },
+  "formal": {
+    "mode": "pinned",
+    "backend": "nautilus",
+    "config": {
+      "execution": {
+        "initial_cash_cny": "1000000.00",
+        "lot_size": 100,
+        "tick_size": "0.01",
+        "slippage_bps": "0",
+        "fees": {
+          "commission_rate": "0.0003",
+          "minimum_commission_cny": "5.00",
+          "sell_stamp_duty_rate": "0.0005",
+          "currency_precision": 2,
+          "rounding_mode": "half_away_from_zero",
+          "rounding_scope": "per_fill"
+        }
+      }
+    }
+  }
+}

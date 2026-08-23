@@ -18,8 +18,8 @@ from quant_runtime.contracts.canonical_hash import (
     sha256_value,
     write_json,
 )
-from quant_runtime.market_data.markethub.client import MarketHubClient, MarketHubContractError
 from quant_runtime.market_data.markethub.catalog import CanonicalInstrument
+from quant_runtime.market_data.markethub.client import MarketHubClient, MarketHubContractError
 from quant_runtime.market_data.markethub.daily_data import CanonicalBar, CanonicalDataset
 from quant_runtime.sdk.snapshot_contract import (
     SnapshotRequest,
@@ -28,6 +28,7 @@ from quant_runtime.sdk.snapshot_contract import (
 from quant_runtime.workspace.atomic import AtomicDirectory
 from quant_runtime.workspace.layout import RuntimeLayout
 
+from .cache import MarketHubCache
 from .publication import HttpPublicationSource, PublicationSource, PublishedPartition
 
 ADAPTER_VERSION = "1.0.0"
@@ -88,6 +89,27 @@ class MarketHubDataAdapter:
             return self._reference(request, layout)
         return self._materialized(request, layout)
 
+    def cache(
+        self,
+        *,
+        policy: str,
+        snapshot: ResolvedSnapshot,
+        layout: RuntimeLayout,
+        consumer: str,
+        run_id: str,
+        evidence_root: Path,
+    ):
+        if snapshot.dataset is None:
+            raise ValueError("cache conversion requires a loaded snapshot dataset")
+        return MarketHubCache(layout).prepare(
+            policy=policy,
+            snapshot_id=snapshot.snapshot_id,
+            dataset=snapshot.dataset,
+            consumer=consumer,
+            run_id=run_id,
+            evidence_root=evidence_root,
+        )
+
     def read(self, request: SnapshotRequest) -> SnapshotVerification:
         client = self._client_factory(request)
         dataset = client.fetch_dataset(
@@ -117,7 +139,11 @@ class MarketHubDataAdapter:
         if request.trust_policy == "verified_immutable":
             verification = self.read(request)
         source = self._source(request, verification)
-        identity = {**request.identity_payload(), "source": source}
+        identity = {
+            **request.identity_payload(),
+            "source": source,
+            "trust_policy": request.trust_policy,
+        }
         snapshot_id = f"sha256:{sha256_value(identity)}"
         manifest = {
             "schema": "quant-research.market-snapshot-ref.v1",
@@ -141,7 +167,11 @@ class MarketHubDataAdapter:
     def _materialized(self, request: SnapshotRequest, layout: RuntimeLayout) -> ResolvedSnapshot:
         verification = self.read(request)
         source = self._source(request, verification)
-        reference_identity = {**request.identity_payload(), "source": source}
+        reference_identity = {
+            **request.identity_payload(),
+            "source": source,
+            "trust_policy": "verified_immutable",
+        }
         reference_id = f"sha256:{sha256_value(reference_identity)}"
         publication = self._publication_source or HttpPublicationSource(request.base_url)
         declared = publication.list_partitions(

@@ -21,10 +21,11 @@
     },
     "snapshot": {
       "type": "object", "additionalProperties": false,
-      "required": ["snapshot_id", "snapshot_mode", "manifest_path", "adapter_version", "read_method"],
+      "required": ["snapshot_id", "snapshot_mode", "manifest_path", "adapter_version", "read_method", "local_cache"],
       "properties": {
         "snapshot_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "snapshot_mode": {"enum": ["reference", "materialized"]},
-        "manifest_path": {"type": "string"}, "adapter_version": {"type": "string"}, "read_method": {"type": "string"}
+        "manifest_path": {"type": "string"}, "adapter_version": {"type": "string"}, "read_method": {"type": "string"},
+        "local_cache": {"enum": ["none", "ephemeral", "persistent"]}
       }
     },
     "topology": {
