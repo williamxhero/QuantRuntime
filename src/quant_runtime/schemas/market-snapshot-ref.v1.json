@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-research.local/schemas/market-snapshot-ref.v1.json",
+  "title": "Market Snapshot Reference v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "snapshot_id", "mode", "trust_policy", "source", "query", "calendar", "contract_mapping", "resolved_at", "local_cache"],
+  "properties": {
+    "schema": {"const": "quant-research.market-snapshot-ref.v1"},
+    "snapshot_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "mode": {"const": "reference"},
+    "trust_policy": {"enum": ["assumed_immutable", "verified_immutable", "mutable"]},
+    "source": {"$ref": "#/$defs/source"},
+    "query": {"$ref": "#/$defs/query"},
+    "calendar": {"type": "string", "minLength": 1},
+    "contract_mapping": {"type": ["string", "null"]},
+    "resolved_at": {"type": "string", "format": "date-time"},
+    "local_cache": {"enum": ["none", "ephemeral", "persistent"]},
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["canonical_input_hash", "data_version", "dataset_version", "catalog_hash", "calendar_hash", "coverage_hash"],
+      "properties": {
+        "canonical_input_hash": {"$ref": "#/$defs/hash"},
+        "data_version": {"type": "string", "minLength": 1},
+        "dataset_version": {"type": "string", "minLength": 1},
+        "catalog_hash": {"$ref": "#/$defs/hash"},
+        "calendar_hash": {"$ref": "#/$defs/hash"},
+        "coverage_hash": {"$ref": "#/$defs/hash"}
+      }
+    }
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source": {
+      "type": "object", "additionalProperties": false,
+      "required": ["adapter", "adapter_version", "endpoint_contract", "base_url", "data_revision"],
+      "properties": {
+        "adapter": {"const": "markethub"}, "adapter_version": {"type": "string", "minLength": 1},
+        "endpoint_contract": {"type": "string", "minLength": 1}, "base_url": {"type": "string", "minLength": 1},
+        "data_revision": {"type": ["string", "null"]}
+      }
+    },
+    "query": {
+      "type": "object", "additionalProperties": false,
+      "required": ["instruments", "start", "end", "frequency", "adjustment"],
+      "properties": {
+        "instruments": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "start": {"type": "string", "format": "date"}, "end": {"type": "string", "format": "date"},
+        "frequency": {"type": "string", "minLength": 1}, "adjustment": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

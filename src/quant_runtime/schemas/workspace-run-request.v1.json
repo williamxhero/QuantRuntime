@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-research.local/schemas/workspace-run-request.v1.json",
+  "title": "Workspace Run Request v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "package", "parameters", "data", "formal"],
+  "properties": {
+    "schema": {"const": "quant-research.workspace-run-request.v1"},
+    "package": {"type": "string", "minLength": 1},
+    "parameters": {"type": "object"},
+    "data": {
+      "type": "object", "additionalProperties": false,
+      "required": ["adapter", "snapshot_mode", "local_cache", "query"],
+      "properties": {
+        "adapter": {"const": "markethub"},
+        "snapshot_mode": {"enum": ["reference", "materialized"]},
+        "trust_policy": {"enum": ["assumed_immutable", "verified_immutable", "mutable"]},
+        "local_cache": {"enum": ["none", "ephemeral", "persistent"]},
+        "endpoint_contract": {"type": "string", "minLength": 1},
+        "base_url": {"type": "string", "minLength": 1},
+        "query": {
+          "type": "object", "additionalProperties": false,
+          "required": ["instruments", "start", "end", "frequency", "adjustment", "calendar"],
+          "properties": {
+            "instruments": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+            "start": {"type": "string", "format": "date"}, "end": {"type": "string", "format": "date"},
+            "frequency": {"type": "string", "minLength": 1}, "adjustment": {"type": "string", "minLength": 1},
+            "calendar": {"type": "string", "minLength": 1}, "contract_mapping": {"type": ["string", "null"]}
+          }
+        }
+      }
+    },
+    "discovery": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": {"enum": ["run", "skip"]}, "backend": {"type": "string", "minLength": 1}, "config": {"type": "object"}
+      }
+    },
+    "formal": {
+      "type": "object", "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": {"enum": ["pinned", "capability_match", "comparison", "agreement_gate"]},
+        "backend": {"type": "string", "minLength": 1},
+        "backends": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "backend_preference": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "minimum_agreement": {"type": "integer", "minimum": 2},
+        "config": {"type": "object"},
+        "agreement": {"type": "object"}
+      }
+    }
+  }
+}

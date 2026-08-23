@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-research.local/schemas/run-manifest.v1.json",
+  "title": "Workspace Run Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "run_id", "status", "created_at", "strategy", "parameters", "snapshot", "topology", "formal_runs", "result", "evidence"],
+  "properties": {
+    "schema": {"const": "quant-research.run-manifest.v1"},
+    "run_id": {"type": "string", "pattern": "^qr-workspace-[0-9a-f]{24}$"},
+    "status": {"enum": ["completed", "failed", "rejected"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "strategy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["strategy_id", "revision", "package_hash"],
+      "properties": {"strategy_id": {"type": "string"}, "revision": {"type": "integer"}, "package_hash": {"$ref": "#/$defs/hash"}}
+    },
+    "parameters": {
+      "type": "object", "additionalProperties": false,
+      "required": ["values", "hash"], "properties": {"values": {"type": "object"}, "hash": {"$ref": "#/$defs/hash"}}
+    },
+    "snapshot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["snapshot_id", "snapshot_mode", "manifest_path", "adapter_version", "read_method"],
+      "properties": {
+        "snapshot_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}, "snapshot_mode": {"enum": ["reference", "materialized"]},
+        "manifest_path": {"type": "string"}, "adapter_version": {"type": "string"}, "read_method": {"type": "string"}
+      }
+    },
+    "topology": {
+      "type": "object", "additionalProperties": false,
+      "required": ["discovery", "formal_mode", "formal_backends"],
+      "properties": {"discovery": {"type": ["string", "null"]}, "formal_mode": {"type": "string"}, "formal_backends": {"type": "array", "items": {"type": "string"}}}
+    },
+    "discovery_artifact_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "formal_runs": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "result": {"type": "object", "required": ["relative_path", "sha256", "content_bytes"]},
+    "evidence": {"type": "array", "items": {"type": "object", "required": ["relative_path", "sha256", "content_bytes"]}}
+  },
+  "$defs": {"hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
+}

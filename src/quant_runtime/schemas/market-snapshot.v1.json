@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-research.local/schemas/market-snapshot.v1.json",
+  "title": "Materialized Market Snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "snapshot_id", "mode", "source_snapshot_ref", "source", "query", "calendar", "catalog", "coverage", "partitions", "resolved_at", "local_cache"],
+  "properties": {
+    "schema": {"const": "quant-research.market-snapshot.v1"},
+    "snapshot_id": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "mode": {"const": "materialized"},
+    "source_snapshot_ref": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "source": {"type": "object"},
+    "query": {"type": "object"},
+    "calendar": {"type": "object", "required": ["path", "sha256", "content_bytes"]},
+    "catalog": {"type": "object", "required": ["path", "sha256", "content_bytes"]},
+    "coverage": {"type": "object", "required": ["path", "sha256", "content_bytes"]},
+    "partitions": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["path", "sha256", "content_bytes", "month"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "content_bytes": {"type": "integer", "minimum": 0}, "month": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}$"}
+        }
+      }
+    },
+    "resolved_at": {"type": "string", "format": "date-time"},
+    "local_cache": {"enum": ["none", "ephemeral", "persistent"]}
+  }
+}

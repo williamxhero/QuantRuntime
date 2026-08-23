@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-research.local/schemas/runtime-capability.v1.json",
+  "title": "Runtime Capability v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "backend_id", "role", "adapter_version", "engine_version", "provides"],
+  "properties": {
+    "schema": {"const": "quant-research.runtime-capability.v1"},
+    "backend_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$"},
+    "role": {"enum": ["data", "discovery", "formal"]},
+    "adapter_version": {"type": "string", "minLength": 1},
+    "engine_version": {"type": "string", "minLength": 1},
+    "provides": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9_.-]+$"}},
+    "conditional": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[a-z0-9_.-]+$"},
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["policy"],
+        "properties": {"policy": {"type": "string", "minLength": 1}}
+      }
+    }
+  }
+}
