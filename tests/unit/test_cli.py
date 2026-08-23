@@ -103,3 +103,53 @@ def test_cli_evaluate_and_golden_stdout_shapes(monkeypatch, tmp_path: Path, caps
         "report_path",
     }
     assert Path(payload["report_path"]) == (tmp_path / "golden_check.json").resolve()
+
+
+def test_workspace_cli_commands_have_stable_json_stdout(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "run_package_validate",
+        lambda package, parameters: ApplicationResult(
+            payload={
+                "status": "valid",
+                "strategy_id": "strategy",
+                "revision": 1,
+                "package_hash": "a" * 64,
+                "parameters_hash": "b" * 64,
+            },
+            exit_code=0,
+        ),
+    )
+    assert cli.main(["package-validate", "--package", "strategy"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "valid"
+    monkeypatch.setattr(
+        cli,
+        "run_snapshot_resolve",
+        lambda request, runtime_root: ApplicationResult(
+            payload={
+                "status": "resolved",
+                "snapshot_id": "sha256:" + "c" * 64,
+                "snapshot_mode": "reference",
+                "manifest_path": str(tmp_path / "snapshot.json"),
+            },
+            exit_code=0,
+        ),
+    )
+    assert cli.main(["snapshot-resolve", "--request", "request.json"]) == 0
+    assert json.loads(capsys.readouterr().out)["snapshot_mode"] == "reference"
+    monkeypatch.setattr(
+        cli,
+        "run_workspace",
+        lambda request, runtime_root: ApplicationResult(
+            payload={
+                "status": "completed",
+                "run_id": "qr-workspace-run",
+                "manifest_path": str(tmp_path / "run_manifest.json"),
+            },
+            exit_code=0,
+        ),
+    )
+    assert cli.main(["run", "--request", "request.json"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "completed"

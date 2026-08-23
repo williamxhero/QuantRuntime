@@ -12,7 +12,11 @@ import pyarrow.parquet as pq
 import pytest
 from conftest import FixtureTransport
 
-from quant_runtime.adapters.data.markethub import MarketHubDataAdapter, PublishedPartition
+from quant_runtime.adapters.data.markethub import (
+    MarketHubDataAdapter,
+    PublishedPartition,
+    ResolvedSnapshot,
+)
 from quant_runtime.adapters.data.markethub.publication import HttpPublicationSource
 from quant_runtime.contracts.canonical_hash import sha256_bytes
 from quant_runtime.market_data.markethub.client import MarketHubClient, MarketHubContractError
@@ -215,3 +219,68 @@ def test_http_publication_source_matches_real_export_manifest_contract() -> None
         ("bars", 3471835),
         ("coverage", 22234),
     ]
+
+
+def test_none_ephemeral_and_persistent_cache_policies_are_observable(
+    canonical_dataset,
+    tmp_path: Path,
+) -> None:
+    layout = RuntimeLayout.create(tmp_path / ".runtime")
+    adapter = MarketHubDataAdapter()
+    snapshot = ResolvedSnapshot(
+        {"snapshot_id": "sha256:" + "a" * 64, "mode": "reference"},
+        tmp_path / "manifest.json",
+        canonical_dataset,
+    )
+    with adapter.cache(
+        policy="none",
+        snapshot=snapshot,
+        layout=layout,
+        consumer="nautilus",
+        run_id="none-run",
+        evidence_root=tmp_path / "none-evidence",
+    ) as use:
+        assert use.path is None
+    assert not list(layout.cache.rglob("*.parquet"))
+    none_manifest = json.loads(
+        (tmp_path / "none-evidence/cache_conversion_manifest.json").read_text()
+    )
+    assert none_manifest["authoritative"] is False
+    assert none_manifest["output"] is None
+
+    with adapter.cache(
+        policy="ephemeral",
+        snapshot=snapshot,
+        layout=layout,
+        consumer="nautilus",
+        run_id="ephemeral-run",
+        evidence_root=tmp_path / "ephemeral-evidence",
+    ) as use:
+        ephemeral_path = use.path
+        assert ephemeral_path is not None and ephemeral_path.is_file()
+    assert ephemeral_path is not None and not ephemeral_path.exists()
+    ephemeral_manifest = json.loads(
+        (tmp_path / "ephemeral-evidence/cache_conversion_manifest.json").read_text()
+    )
+    assert ephemeral_manifest["retained"] is False
+    assert len(ephemeral_manifest["output"]["sha256"]) == 64
+
+    paths = []
+    for index in range(2):
+        with adapter.cache(
+            policy="persistent",
+            snapshot=snapshot,
+            layout=layout,
+            consumer="nautilus",
+            run_id=f"persistent-run-{index}",
+            evidence_root=tmp_path / f"persistent-evidence-{index}",
+        ) as use:
+            assert use.path is not None and use.path.is_file()
+            paths.append(use.path)
+    assert paths[0] == paths[1]
+    persistent_manifest = json.loads(
+        (tmp_path / "persistent-evidence-1/cache_conversion_manifest.json").read_text()
+    )
+    assert persistent_manifest["authoritative"] is False
+    assert persistent_manifest["retained"] is True
+    assert persistent_manifest["reused"] is True
