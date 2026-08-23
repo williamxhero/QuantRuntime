@@ -25,6 +25,10 @@ The production CLI always reads MarketHub. There is no local-price fallback.
 The final stdout line is a compact JSON object containing `status`, `run_id`,
 and `manifest_path`.
 
+Each successful run also writes `strategy_spec.json` and
+`strategy_decisions.json`. These are neutral, pre-matching golden-contract
+artifacts; they contain no fills or precomputed execution results.
+
 ## Verify
 
 ```powershell

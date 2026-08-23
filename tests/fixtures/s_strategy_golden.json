@@ -1,0 +1,24 @@
+{
+  "schema": "markethub-qlib.strategy-golden.v1",
+  "fixture_note": "Offline strategy-semantics golden over s_canonical_contract.json; no fills or current MarketHub truth are represented.",
+  "strategy_spec": {
+    "strategy_id": "cross-sectional-momentum-topk",
+    "spec_revision": "1",
+    "parameters": {
+      "lookback_days": 3,
+      "top_k": 1
+    }
+  },
+  "strategy_spec_hash": "f06669db3f35dd2096456df51fb69707dea3fd50d53d828bdaff8e7833bccd6d",
+  "strategy_decisions": {
+    "schema": "canonical-strategy-decisions.v1",
+    "strategy_spec_hash": "f06669db3f35dd2096456df51fb69707dea3fd50d53d828bdaff8e7833bccd6d",
+    "decisions": [
+      {"signal_date": "2025-01-07", "instrument": "SZ.000001", "target_weight": "1"},
+      {"signal_date": "2025-01-08", "instrument": "SZ.000001", "target_weight": "1"},
+      {"signal_date": "2025-01-09", "instrument": "SZ.000001", "target_weight": "1"},
+      {"signal_date": "2025-01-10", "instrument": "SZ.000001", "target_weight": "1"}
+    ]
+  },
+  "reference_decision_hash": "5446b519590fc2e047ea3dae7d24c3edfca1cb923c705d341652d8c40e038439"
+}

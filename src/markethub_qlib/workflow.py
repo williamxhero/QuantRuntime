@@ -44,15 +44,17 @@ def run_discovery(
         page_size=config.page_size,
     )
     signals = _build_signals(dataset.frame, config.lookback_days)
+    scored = signals.dropna(subset=["score"])
     valid = signals.dropna(subset=["score", "label"])
-    if valid.empty:
+    if scored.empty or valid.empty:
         raise ValueError("not enough observations to evaluate the discovery signal")
 
     # Upstream Qlib owns the cross-sectional rank-IC calculation primitive.
     ic = valid.groupby(level="datetime", sort=True).apply(_qlib_rank_ic)
     ic.name = "rank_ic"
-    candidates = _select_top_k(valid, config.top_k)
-    daily_returns = candidates.groupby(level="datetime", sort=True)["label"].mean()
+    candidates = _select_top_k(scored, config.top_k)
+    evaluated_candidates = candidates.dropna(subset=["label"])
+    daily_returns = evaluated_candidates.groupby(level="datetime", sort=True)["label"].mean()
 
     # Upstream Qlib owns the standard daily risk analysis export.
     risk = risk_analysis(daily_returns, freq="day", mode="sum")
@@ -64,7 +66,7 @@ def run_discovery(
     metrics = {
         "framework_version": qlib.__version__,
         "observation_count": observation_count,
-        "signal_days": int(valid.index.get_level_values("datetime").nunique()),
+        "signal_days": int(scored.index.get_level_values("datetime").nunique()),
         "candidate_rows": int(len(candidates)),
         "mean_rank_ic": mean_ic,
         "quick_gate_passed": passed,

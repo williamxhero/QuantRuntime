@@ -76,6 +76,10 @@ class RunConfig:
         return config
 
     def validate(self) -> None:
+        if self.strategy_id != "cross-sectional-momentum-topk":
+            raise ValueError("unsupported strategy_id")
+        if self.spec_revision != "1":
+            raise ValueError("unsupported spec_revision")
         if self.universe_kind not in {"codes", "all_a"}:
             raise ValueError("universe.kind must be codes or all_a")
         if self.universe_kind == "codes" and not self.codes:

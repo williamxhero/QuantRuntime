@@ -10,6 +10,20 @@ The workspace has three boundaries:
 3. `artifacts` writes deterministic evaluation exports and a content-addressed
    `markethub-qlib.run-manifest.v1` manifest.
 
+## Neutral strategy contract
+
+`strategy_spec.json` contains only `strategy_id`, `spec_revision`, and the
+`lookback_days`/`top_k` parameters. Its canonical SHA-256 is the manifest's
+top-level `strategy_spec_hash`.
+
+`strategy_decisions.json` uses schema `canonical-strategy-decisions.v1` and
+contains the spec hash plus pre-matching decision rows. Each row has
+`signal_date`, `instrument`, and a canonical decimal-string `target_weight`.
+Rows are ordered by date, then source score descending and instrument ascending;
+suspended rows are excluded. The SHA-256 of the canonical JSON envelope is
+published as `manifest.metrics.reference_decision_hash`. No fills, positions,
+fees, or future-return labels enter this contract.
+
 MarketHub data is never written as a reusable local data copy. Qlib evaluation
 exports contain only signals, labels, IC series, candidates, and summary
 metrics. The production dependency direction ends at Qlib and MarketHub; this

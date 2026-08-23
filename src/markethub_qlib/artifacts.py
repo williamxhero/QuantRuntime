@@ -8,6 +8,7 @@ import pandas as pd
 
 from .canonical import canonical_json, sha256_bytes, sha256_value
 from .config import RunConfig
+from .contracts import build_strategy_decisions, decision_hash
 from .workflow import DiscoveryResult
 
 MANIFEST_SCHEMA = "markethub-qlib.run-manifest.v1"
@@ -22,7 +23,18 @@ class WrittenRun:
 
 def write_successful_run(config: RunConfig, result: DiscoveryResult, output: Path) -> WrittenRun:
     output.mkdir(parents=True, exist_ok=True)
+    config_hash = sha256_value(config.raw)
+    strategy_spec_hash = sha256_value(config.strategy_spec)
+    decisions = build_strategy_decisions(
+        result.candidates,
+        strategy_spec_hash=strategy_spec_hash,
+    )
+    reference_decision_hash = decision_hash(decisions)
+    manifest_metrics = dict(result.metrics)
+    manifest_metrics["reference_decision_hash"] = reference_decision_hash
     paths: list[Path] = []
+    paths.append(_write_json(output / "strategy_spec.json", config.strategy_spec))
+    paths.append(_write_json(output / "strategy_decisions.json", decisions))
     paths.append(_write_csv(output / "qlib_signals.csv", result.signals))
     paths.append(_write_csv(output / "qlib_rank_ic.csv", result.ic.to_frame()))
     paths.append(_write_csv(output / "qlib_candidates.csv", result.candidates))
@@ -36,7 +48,7 @@ def write_successful_run(config: RunConfig, result: DiscoveryResult, output: Pat
             "qlib.contrib.evaluate.risk_analysis",
         ],
         "strategy_spec": config.strategy_spec,
-        "metrics": _deterministic_metrics(result.metrics),
+        "metrics": _deterministic_metrics(manifest_metrics),
         "data_lineage": {
             "data_version": result.dataset.data_version,
             "dataset_version": result.dataset.dataset_version,
@@ -44,8 +56,6 @@ def write_successful_run(config: RunConfig, result: DiscoveryResult, output: Pat
         },
     }
     paths.append(_write_json(output / "qlib_recorder_export.json", recorder))
-    config_hash = sha256_value(config.raw)
-    strategy_spec_hash = sha256_value(config.strategy_spec)
     run_id = _run_id(config_hash, strategy_spec_hash, result.dataset.canonical_input_hash)
     manifest = _manifest(
         run_id=run_id,
@@ -57,7 +67,7 @@ def write_successful_run(config: RunConfig, result: DiscoveryResult, output: Pat
         strategy_spec_hash=strategy_spec_hash,
         canonical_input_hash=result.dataset.canonical_input_hash,
         artifacts=_artifact_records(output, paths),
-        metrics=result.metrics,
+        metrics=manifest_metrics,
     )
     manifest_path = _write_json(output / "run_manifest.json", manifest)
     return WrittenRun(status=result.status, run_id=run_id, manifest_path=manifest_path.resolve())
