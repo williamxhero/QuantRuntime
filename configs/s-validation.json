@@ -1,0 +1,53 @@
+{
+  "schema": "markethub-nautilus.run-config.v1",
+  "data": {
+    "base_url": "http://yosef-server:8803",
+    "start": "2025-01-01",
+    "end": "2025-01-31",
+    "instruments": ["SH.600000", "SZ.000001"]
+  },
+  "strategy": {
+    "name": "a_share_rule_seam_s",
+    "initial_cash_cny": "1000000.00",
+    "execution": {
+      "fill_timing": "next_open",
+      "lot_size": 100,
+      "tick_size": "0.01"
+    },
+    "fees": {
+      "commission_rate": "0.0003",
+      "minimum_commission_cny": "5.00",
+      "sell_stamp_duty_rate": "0.0005",
+      "currency_precision": 2,
+      "rounding_mode": "half_away_from_zero",
+      "rounding_scope": "per_fill"
+    },
+    "actions": [
+      {"trading_day":"2025-01-02","instrument":"SH.600000","signal":"baseline_buy","target_quantity":100,"order_intent":"buy_market_next_open","expected_rule":"allow"},
+      {"trading_day":"2025-01-03","instrument":"SH.600000","signal":"same_day_sell","target_quantity":0,"order_intent":"sell_market_next_open","expected_rule":"t_plus_one"},
+      {"trading_day":"2025-01-06","instrument":"SH.600000","signal":"next_day_sell","target_quantity":0,"order_intent":"sell_market_next_open","expected_rule":"allow"},
+      {"trading_day":"2025-01-07","instrument":"SH.600000","signal":"second_buy","target_quantity":100,"order_intent":"buy_market_next_open","expected_rule":"allow"},
+      {"trading_day":"2025-01-09","instrument":"SH.600000","signal":"limit_down_sell","target_quantity":0,"order_intent":"sell_market_next_open","expected_rule":"limit_down"},
+      {"trading_day":"2025-01-10","instrument":"SH.600000","signal":"post_limit_sell","target_quantity":0,"order_intent":"sell_market_next_open","expected_rule":"allow"},
+      {"trading_day":"2025-01-13","instrument":"SZ.000001","signal":"limit_up_buy","target_quantity":100,"order_intent":"buy_market_next_open","expected_rule":"limit_up"},
+      {"trading_day":"2025-01-14","instrument":"SZ.000001","signal":"suspended_buy","target_quantity":100,"order_intent":"buy_market_next_open","expected_rule":"suspended"},
+      {"trading_day":"2025-01-15","instrument":"SZ.000001","signal":"baseline_buy","target_quantity":100,"order_intent":"buy_market_next_open","expected_rule":"allow"},
+      {"trading_day":"2025-01-16","instrument":"SZ.000001","signal":"same_day_sell","target_quantity":0,"order_intent":"sell_market_next_open","expected_rule":"t_plus_one"},
+      {"trading_day":"2025-01-17","instrument":"SZ.000001","signal":"limit_down_sell","target_quantity":0,"order_intent":"sell_market_next_open","expected_rule":"limit_down"},
+      {"trading_day":"2025-01-20","instrument":"SZ.000001","signal":"post_limit_sell","target_quantity":0,"order_intent":"sell_market_next_open","expected_rule":"allow"},
+      {"trading_day":"2025-01-22","instrument":"SH.600000","signal":"no_bar_buy","target_quantity":100,"order_intent":"buy_market_next_open","expected_rule":"no_bar"},
+      {"trading_day":"2025-01-23","instrument":"SH.600000","signal":"pre_listing_buy","target_quantity":100,"order_intent":"buy_market_next_open","expected_rule":"pre_listing"},
+      {"trading_day":"2025-01-24","instrument":"SH.600000","signal":"post_delisting_buy","target_quantity":100,"order_intent":"buy_market_next_open","expected_rule":"post_delisting"}
+    ],
+    "allow_rule_overrides": true,
+    "rule_overrides": {
+      "2025-01-09|SH.600000":{"limit_down":true},
+      "2025-01-13|SZ.000001":{"limit_up":true},
+      "2025-01-14|SZ.000001":{"suspended":true},
+      "2025-01-17|SZ.000001":{"limit_down":true},
+      "2025-01-22|SH.600000":{"has_bar":false},
+      "2025-01-23|SH.600000":{"before_listing":true},
+      "2025-01-24|SH.600000":{"after_delisting":true}
+    }
+  }
+}

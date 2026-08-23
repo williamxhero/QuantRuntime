@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "markethub-nautilus.run-manifest.v1",
+  "title": "MarketHub Nautilus run manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "run_id",
+    "framework",
+    "framework_version",
+    "tool_version",
+    "status",
+    "data_version",
+    "config_hash",
+    "strategy_spec_hash",
+    "canonical_input_hash",
+    "normalized_output_hash",
+    "artifacts"
+  ],
+  "properties": {
+    "schema": {"const": "markethub-nautilus.run-manifest.v1"},
+    "run_id": {"type": "string", "pattern": "^nt-[0-9a-f]{24}$"},
+    "framework": {"const": "nautilus_trader"},
+    "framework_version": {"type": "string"},
+    "tool_version": {"type": "string"},
+    "status": {"enum": ["success", "failed"]},
+    "data_version": {"type": ["string", "null"]},
+    "config_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "strategy_spec_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "canonical_input_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "normalized_output_hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["relative_path", "sha256", "content_bytes"],
+        "properties": {
+          "relative_path": {"type": "string"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "content_bytes": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "metrics": {"type": "object"},
+    "error": {"type": "object"}
+  }
+}

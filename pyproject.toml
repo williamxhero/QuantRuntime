@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "markethub-nautilus"
+version = "0.1.0"
+description = "Neutral MarketHub adapter and A-share backtest runner for upstream NautilusTrader"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "nautilus_trader==1.231.0",
+  "psutil==7.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.4.1",
+  "pytest-cov==6.2.1",
+  "ruff==0.12.9",
+]
+
+[project.scripts]
+markethub-nautilus = "markethub_nautilus.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/markethub_nautilus"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+  "connected: requires the live yosef-server MarketHub endpoint",
+  "engine: requires the pinned NautilusTrader runtime",
+  "golden: validates the frozen S acceptance fixture",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

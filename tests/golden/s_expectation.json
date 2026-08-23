@@ -1,0 +1,19 @@
+{
+  "source": "formal-engine-poc frozen nautilus-s-final evidence",
+  "framework_version": "1.231.0",
+  "trading_days": 18,
+  "bars": 36,
+  "decisions": 15,
+  "fills": 6,
+  "total_fees_cny": "31.54",
+  "final_account_cny": "999938.46",
+  "rejection_reasons": [
+    "limit_down",
+    "limit_up",
+    "no_bar",
+    "post_delisting",
+    "pre_listing",
+    "suspended",
+    "t_plus_one"
+  ]
+}
