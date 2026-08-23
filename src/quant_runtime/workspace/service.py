@@ -69,7 +69,10 @@ class StrategyWorkspace:
         snapshot_request = SnapshotRequest.from_dict(request["data"])
         snapshot = self.data_adapter.resolve(snapshot_request, self.layout)
         if snapshot.dataset is None:
-            verified = self.data_adapter.read(snapshot_request)
+            verified = self.data_adapter.read(
+                snapshot_request,
+                expected_revision=str(snapshot.manifest["source"]["data_revision"]),
+            )
             snapshot = replace(snapshot, dataset=verified.dataset)
         discovery_backend = self._resolve_discovery(package, request.get("discovery"))
         selection = self.registry.resolve_formal(
@@ -77,16 +80,49 @@ class StrategyWorkspace:
             package.requirements,
             package.implementations("formal"),
         )
+        discovery_request = request.get("discovery") or {"mode": "skip"}
+        discovery_profile = (
+            self.registry.profile("discovery", discovery_backend)
+            if discovery_backend is not None
+            else None
+        )
+        formal_profiles = tuple(
+            self.registry.profile("formal", backend_id) for backend_id in selection.backend_ids
+        )
         run_identity = {
             "strategy_package_hash": package.package_hash,
             "parameters_hash": package.parameters_hash(parameters),
             "snapshot_id": snapshot.snapshot_id,
-            "discovery": discovery_backend,
-            "formal": {
-                "mode": selection.mode,
-                "backends": selection.backend_ids,
-                "minimum_agreement": selection.minimum_agreement,
-                "config": request["formal"].get("config", {}),
+            "request_semantics": {
+                "data": {
+                    **snapshot_request.identity_payload(),
+                    "snapshot_mode": snapshot_request.snapshot_mode,
+                    "trust_policy": snapshot_request.trust_policy,
+                    "local_cache": snapshot_request.local_cache,
+                },
+                "discovery": {
+                    **discovery_request,
+                    "resolved_backend": discovery_backend,
+                },
+                "formal": {
+                    **request["formal"],
+                    "resolved_backends": selection.backend_ids,
+                    "resolved_minimum_agreement": selection.minimum_agreement,
+                },
+            },
+            "snapshot_source": snapshot.manifest["source"],
+            "read_method": (
+                "materialized_parquet" if snapshot.mode == "materialized" else "direct_markethub"
+            ),
+            "capability_profiles": {
+                "data": {
+                    "backend_id": self.data_adapter.name,
+                    "adapter_version": self.data_adapter.adapter_version,
+                },
+                "discovery": (
+                    _profile_identity(discovery_profile) if discovery_profile is not None else None
+                ),
+                "formal": [_profile_identity(item) for item in formal_profiles],
             },
         }
         run_id = f"qr-workspace-{sha256_value(run_identity)[:24]}"
@@ -296,3 +332,14 @@ def run(
 
 def _now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _profile_identity(profile: Any) -> dict[str, Any]:
+    return {
+        "backend_id": profile.backend_id,
+        "role": profile.role,
+        "adapter_version": profile.adapter_version,
+        "engine_version": profile.engine_version,
+        "provides": sorted(profile.provides),
+        "conditional": dict(sorted(profile.conditional.items())),
+    }

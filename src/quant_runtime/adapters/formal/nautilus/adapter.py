@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import nautilus_trader
 
+from quant_runtime.adapters.data.markethub.cache import MarketHubCache
 from quant_runtime.adapters.interface import FormalAdapterResult, FormalRunInput
 from quant_runtime.contracts.canonical_hash import artifact_records, canonical_json
 from quant_runtime.contracts.strategy_spec import StrategySpec
@@ -23,13 +24,24 @@ class NautilusWorkspaceAdapter:
     def run(self, value: FormalRunInput) -> FormalAdapterResult:
         if value.snapshot.dataset is None:
             raise ValueError("Nautilus formal execution requires a verified snapshot read")
+        dataset = value.snapshot.dataset
+        cache_consumed = False
+        read_method = (
+            "materialized_parquet" if value.snapshot.mode == "materialized" else "direct_markethub"
+        )
+        if value.cache_path is not None:
+            dataset = MarketHubCache.load(value.cache_path)
+            if dataset.input_hash != value.snapshot.dataset.input_hash:
+                raise ValueError("formal cache input differs from the verified snapshot input")
+            cache_consumed = True
+            read_method = "non_authoritative_cache"
         strategy_class = load_package_entrypoint(
             value.package.root,
             value.package.resolve_entrypoint("formal", self.name),
         )
         config = _formal_config(value)
         result = run_engine(
-            value.snapshot.dataset,
+            dataset,
             config,
             value.output,
             strategy_class=strategy_class,
@@ -51,7 +63,8 @@ class NautilusWorkspaceAdapter:
                 "normalized_output_hash": result.output_hash,
                 "cache_policy": value.cache_policy,
                 "cache_transform_version": value.cache_transform_version,
-                "cache_consumed": False,
+                "cache_consumed": cache_consumed,
+                "read_method": read_method,
             },
             positions=tuple(result.positions),
             fills=tuple(result.fills),

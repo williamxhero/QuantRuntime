@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from itertools import combinations
 from typing import Any
 
@@ -90,4 +91,8 @@ def _compare(value: Any, operator: str, threshold: Any) -> bool:
 
 
 def _stable_metric(value: Any) -> Any:
-    return None if isinstance(value, float) else value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(f"non-finite formal metric is incomparable: {value!r}")
+        return {"finite_float": format(value, ".17g")}
+    return value

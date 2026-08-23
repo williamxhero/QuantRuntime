@@ -110,7 +110,12 @@ class MarketHubDataAdapter:
             evidence_root=evidence_root,
         )
 
-    def read(self, request: SnapshotRequest) -> SnapshotVerification:
+    def read(
+        self,
+        request: SnapshotRequest,
+        *,
+        expected_revision: str | None = None,
+    ) -> SnapshotVerification:
         client = self._client_factory(request)
         dataset = client.fetch_dataset(
             request.instruments,
@@ -132,13 +137,24 @@ class MarketHubDataAdapter:
         )
         if any(not item["complete"] for item in coverage):
             raise MarketHubContractError(f"snapshot coverage is incomplete: {coverage!r}")
+        actual_revision = f"{dataset.data_version}:{dataset.dataset_version}"
+        if expected_revision is not None and actual_revision != expected_revision:
+            raise MarketHubContractError(
+                "MarketHub reference snapshot drifted before read: "
+                f"{expected_revision!r} -> {actual_revision!r}"
+            )
         return SnapshotVerification(dataset, catalog, calendar, coverage)
 
     def _reference(self, request: SnapshotRequest, layout: RuntimeLayout) -> ResolvedSnapshot:
         verification = None
         if request.trust_policy == "verified_immutable":
             verification = self.read(request)
-        source = self._source(request, verification)
+        revision = (
+            f"{verification.dataset.data_version}:{verification.dataset.dataset_version}"
+            if verification is not None
+            else self._resolve_revision(request)
+        )
+        source = self._source(request, revision)
         identity = {
             **request.identity_payload(),
             "source": source,
@@ -166,7 +182,10 @@ class MarketHubDataAdapter:
 
     def _materialized(self, request: SnapshotRequest, layout: RuntimeLayout) -> ResolvedSnapshot:
         verification = self.read(request)
-        source = self._source(request, verification)
+        source = self._source(
+            request,
+            f"{verification.dataset.data_version}:{verification.dataset.dataset_version}",
+        )
         reference_identity = {
             **request.identity_payload(),
             "source": source,
@@ -262,11 +281,8 @@ class MarketHubDataAdapter:
     def _source(
         self,
         request: SnapshotRequest,
-        verification: SnapshotVerification | None,
+        revision: str,
     ) -> dict[str, Any]:
-        revision = None
-        if verification is not None:
-            revision = f"{verification.dataset.data_version}:{verification.dataset.dataset_version}"
         return {
             "adapter": self.name,
             "adapter_version": self.adapter_version,
@@ -274,6 +290,10 @@ class MarketHubDataAdapter:
             "base_url": request.base_url,
             "data_revision": revision,
         }
+
+    def _resolve_revision(self, request: SnapshotRequest) -> str:
+        health = self._client_factory(request).open()
+        return f"{health.data_version}:{health.daily_dataset_version}"
 
     def _publish_manifest(
         self,

@@ -13,6 +13,7 @@ import pytest
 from conftest import FixtureTransport
 
 from quant_runtime.adapters.data.markethub import (
+    MarketHubCache,
     MarketHubDataAdapter,
     PublishedPartition,
     ResolvedSnapshot,
@@ -121,18 +122,47 @@ class PublicationFixture:
 
 
 def test_reference_defaults_to_assumed_without_read_and_cache_is_not_identity(
+    s_fixture,
     tmp_path: Path,
 ) -> None:
-    adapter = MarketHubDataAdapter(client_factory=lambda _: pytest.fail("unexpected read"))
+    transports = []
+
+    def metadata_only_factory(_):
+        transport = FixtureTransport(s_fixture)
+        transports.append(transport)
+        return MarketHubClient(transport=transport)
+
+    adapter = MarketHubDataAdapter(client_factory=metadata_only_factory)
     layout = RuntimeLayout.create(tmp_path / ".runtime")
     first = adapter.resolve(request(), layout)
     second = adapter.resolve(request(local_cache="persistent"), layout)
     assert first.snapshot_id == second.snapshot_id
     assert first.manifest_path == second.manifest_path
     assert first.manifest["trust_policy"] == "assumed_immutable"
+    assert first.manifest["source"]["data_revision"] == ("fixture-global-v1:fixture-daily-v1")
     assert first.dataset is None
     assert "verification" not in first.manifest
     assert "local_cache" not in first.manifest
+    assert len(transports) == 2
+    assert all(item.health_reads == 1 and item.daily_page_index == 0 for item in transports)
+
+
+def test_reference_read_fails_if_frozen_revision_drifts(s_fixture, tmp_path: Path) -> None:
+    changed = json.loads(json.dumps(s_fixture))
+    changed["health"]["dataset_versions"]["stock_daily_1d"] = "fixture-daily-v2"
+    for page in changed["daily_pages"]:
+        page["meta"]["dataset_version"] = "fixture-daily-v2"
+    calls = iter((s_fixture, changed))
+    adapter = MarketHubDataAdapter(
+        client_factory=lambda _: MarketHubClient(transport=FixtureTransport(next(calls)))
+    )
+    layout = RuntimeLayout.create(tmp_path / ".runtime")
+    snapshot = adapter.resolve(request(), layout)
+    with pytest.raises(MarketHubContractError, match="drifted before read"):
+        adapter.read(
+            request(),
+            expected_revision=snapshot.manifest["source"]["data_revision"],
+        )
 
 
 def test_verified_reference_is_only_emitted_after_real_read(s_fixture, tmp_path: Path) -> None:
@@ -257,7 +287,8 @@ def test_none_ephemeral_and_persistent_cache_policies_are_observable(
         evidence_root=tmp_path / "ephemeral-evidence",
     ) as use:
         ephemeral_path = use.path
-        assert ephemeral_path is not None and ephemeral_path.is_file()
+        assert ephemeral_path is not None and ephemeral_path.is_dir()
+        assert MarketHubCache.load(ephemeral_path).input_hash == canonical_dataset.input_hash
     assert ephemeral_path is not None and not ephemeral_path.exists()
     ephemeral_manifest = json.loads(
         (tmp_path / "ephemeral-evidence/cache_conversion_manifest.json").read_text()
@@ -275,7 +306,8 @@ def test_none_ephemeral_and_persistent_cache_policies_are_observable(
             run_id=f"persistent-run-{index}",
             evidence_root=tmp_path / f"persistent-evidence-{index}",
         ) as use:
-            assert use.path is not None and use.path.is_file()
+            assert use.path is not None and use.path.is_dir()
+            assert MarketHubCache.load(use.path).input_hash == canonical_dataset.input_hash
             paths.append(use.path)
     assert paths[0] == paths[1]
     persistent_manifest = json.loads(
