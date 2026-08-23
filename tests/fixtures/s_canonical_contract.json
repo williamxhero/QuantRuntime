@@ -1,0 +1,72 @@
+{
+  "schema": "formal-engine-poc.s-contract-fixture.v1",
+  "fixture_note": "Copied as an offline seam fixture from the validated S test shape; it is not a current MarketHub truth claim and is never a production fallback.",
+  "health": {
+    "status": "ok",
+    "data_version": "fixture-global-v1",
+    "dataset_versions": {
+      "stock_daily_1d": "fixture-daily-v1"
+    }
+  },
+  "catalog": [
+    {
+      "code": "000001",
+      "exchange": "SZSE",
+      "list_date": "1991-04-03",
+      "delist_date": ""
+    },
+    {
+      "code": "600000",
+      "exchange": "SHSE",
+      "list_date": "1999-11-10",
+      "delist_date": ""
+    }
+  ],
+  "calendar": [
+    {"exchange": "SSE", "trade_date": "2025-01-02", "is_open": true},
+    {"exchange": "SSE", "trade_date": "2025-01-03", "is_open": true},
+    {"exchange": "SSE", "trade_date": "2025-01-06", "is_open": true},
+    {"exchange": "SSE", "trade_date": "2025-01-07", "is_open": true},
+    {"exchange": "SSE", "trade_date": "2025-01-08", "is_open": true},
+    {"exchange": "SSE", "trade_date": "2025-01-09", "is_open": true},
+    {"exchange": "SSE", "trade_date": "2025-01-10", "is_open": true}
+  ],
+  "daily_pages": [
+    {
+      "items": [
+        {"code":"000001","trade_time":"2025-01-02","freq":"1d","open":10.0,"high":10.2,"low":9.9,"close":10.1,"volume":1000,"amount":10100,"pre_close":10.0,"is_suspended":false,"is_st":false},
+        {"code":"600000","trade_time":"2025-01-02","freq":"1d","open":20.0,"high":20.1,"low":19.7,"close":19.8,"volume":2000,"amount":39600,"pre_close":20.0,"is_suspended":false,"is_st":false},
+        {"code":"000001","trade_time":"2025-01-03","freq":"1d","open":10.1,"high":10.4,"low":10.0,"close":10.3,"volume":1100,"amount":11330,"pre_close":10.1,"is_suspended":false,"is_st":false},
+        {"code":"600000","trade_time":"2025-01-03","freq":"1d","open":19.8,"high":20.0,"low":19.6,"close":19.9,"volume":2100,"amount":41790,"pre_close":19.8,"is_suspended":false,"is_st":false},
+        {"code":"000001","trade_time":"2025-01-06","freq":"1d","open":10.3,"high":10.6,"low":10.2,"close":10.5,"volume":1200,"amount":12600,"pre_close":10.3,"is_suspended":false,"is_st":false},
+        {"code":"600000","trade_time":"2025-01-06","freq":"1d","open":19.9,"high":20.0,"low":19.4,"close":19.5,"volume":2200,"amount":42900,"pre_close":19.9,"is_suspended":false,"is_st":false},
+        {"code":"000001","trade_time":"2025-01-07","freq":"1d","open":10.5,"high":10.7,"low":10.4,"close":10.6,"volume":1300,"amount":13780,"pre_close":10.5,"is_suspended":false,"is_st":false},
+        {"code":"600000","trade_time":"2025-01-07","freq":"1d","open":19.5,"high":19.9,"low":19.4,"close":19.8,"volume":2300,"amount":45540,"pre_close":19.5,"is_suspended":false,"is_st":false}
+      ],
+      "meta": {
+        "data_version":"fixture-global-v1","dataset_version":"fixture-daily-v1","total_rows":14,"returned_rows":8,"complete":true,"truncated":false,"page_complete":true,"request_complete":true,"delivery_complete":true,"next_cursor":"opaque-page-2","universe_kind":"codes","universe_size":2,"page_size":8,
+        "coverage":[
+          {"code":"000001","expected_rows":7,"actual_rows":7,"missing_rows":0,"missing_trade_dates":[],"complete":true},
+          {"code":"600000","expected_rows":7,"actual_rows":7,"missing_rows":0,"missing_trade_dates":[],"complete":true}
+        ]
+      }
+    },
+    {
+      "items": [
+        {"code":"000001","trade_time":"2025-01-08","freq":"1d","open":10.6,"high":10.9,"low":10.5,"close":10.8,"volume":1400,"amount":15120,"pre_close":10.6,"is_suspended":false,"is_st":false},
+        {"code":"600000","trade_time":"2025-01-08","freq":"1d","open":19.8,"high":19.9,"low":19.2,"close":19.3,"volume":2400,"amount":46320,"pre_close":19.8,"is_suspended":false,"is_st":false},
+        {"code":"000001","trade_time":"2025-01-09","freq":"1d","open":10.8,"high":11.0,"low":10.7,"close":10.9,"volume":1500,"amount":16350,"pre_close":10.8,"is_suspended":false,"is_st":false},
+        {"code":"600000","trade_time":"2025-01-09","freq":"1d","open":19.3,"high":19.8,"low":19.2,"close":19.7,"volume":2500,"amount":49250,"pre_close":19.3,"is_suspended":false,"is_st":false},
+        {"code":"000001","trade_time":"2025-01-10","freq":"1d","open":10.9,"high":11.2,"low":10.8,"close":11.1,"volume":1600,"amount":17760,"pre_close":10.9,"is_suspended":false,"is_st":false},
+        {"code":"600000","trade_time":"2025-01-10","freq":"1d","open":19.7,"high":19.8,"low":19.0,"close":19.1,"volume":2600,"amount":49660,"pre_close":19.7,"is_suspended":false,"is_st":false}
+      ],
+      "meta": {
+        "data_version":"fixture-global-v1","dataset_version":"fixture-daily-v1","total_rows":14,"returned_rows":6,"complete":true,"truncated":false,"page_complete":true,"request_complete":true,"delivery_complete":true,"next_cursor":null,"universe_kind":"codes","universe_size":2,"page_size":8,
+        "coverage":[
+          {"code":"000001","expected_rows":7,"actual_rows":7,"missing_rows":0,"missing_trade_dates":[],"complete":true},
+          {"code":"600000","expected_rows":7,"actual_rows":7,"missing_rows":0,"missing_trade_dates":[],"complete":true}
+        ]
+      }
+    }
+  ]
+}

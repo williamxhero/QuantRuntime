@@ -1,0 +1,25 @@
+{
+  "schema": "markethub-qlib.run-config.v1",
+  "strategy_id": "cross-sectional-momentum-topk",
+  "spec_revision": "1",
+  "market_hub": {
+    "base_url": "http://yosef-server:8803",
+    "timeout_seconds": 60.0,
+    "page_size": 50000
+  },
+  "universe": {
+    "kind": "codes",
+    "codes": ["000001", "600000"]
+  },
+  "start_date": "2025-01-01",
+  "end_date": "2025-01-31",
+  "fields": ["open", "high", "low", "close", "volume", "amount", "pre_close"],
+  "parameters": {
+    "lookback_days": 3,
+    "top_k": 1
+  },
+  "quick_gate_policy": {
+    "minimum_observations": 5,
+    "minimum_mean_ic": -1.0
+  }
+}
