@@ -4,14 +4,14 @@ import hashlib
 import json
 from pathlib import Path
 
-from quant_runtime.discovery.workflow import DiscoveryConfig
-from quant_runtime.formal.runner import FormalConfig
+from quant_runtime.discovery.qlib.workflow import DiscoveryConfig
+from quant_runtime.formal.nautilus.runner import FormalConfig
 
 ROOT = Path(__file__).parents[2]
 
 
 def test_discovery_config_hash_is_exact_file_bytes(tmp_path: Path) -> None:
-    source_path = ROOT / "configs" / "discovery" / "s-momentum.json"
+    source_path = ROOT / "configs" / "discovery" / "qlib" / "s-momentum.json"
     source = DiscoveryConfig.load(source_path)
     compact_path = tmp_path / "compact.json"
     raw = json.loads(source_path.read_text())
@@ -27,7 +27,7 @@ def test_discovery_config_hash_is_exact_file_bytes(tmp_path: Path) -> None:
 
 
 def test_formal_config_hash_is_exact_file_bytes() -> None:
-    path = ROOT / "configs" / "formal" / "s-momentum.json"
+    path = ROOT / "configs" / "formal" / "nautilus" / "s-momentum.json"
     config = FormalConfig.load(path)
     assert config.config_hash == hashlib.sha256(path.read_bytes()).hexdigest()
     assert config.lot_size == 100

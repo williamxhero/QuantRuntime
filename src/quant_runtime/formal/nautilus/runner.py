@@ -28,8 +28,8 @@ from quant_runtime.contracts.canonical_hash import (
 )
 from quant_runtime.contracts.formal_manifest import FORMAL_SCHEMA
 from quant_runtime.contracts.strategy_spec import StrategySpec, resolve_strategy_path
-from quant_runtime.markethub.client import MarketHubClient
-from quant_runtime.markethub.daily_data import CanonicalDataset
+from quant_runtime.market_data.markethub.client import MarketHubClient
+from quant_runtime.market_data.markethub.daily_data import CanonicalDataset
 from quant_runtime.semantics.decision_record import decision_envelope, decision_hash
 
 from .china_market_rules import AShareFeeModel, AShareRuleBook, FeeSpec

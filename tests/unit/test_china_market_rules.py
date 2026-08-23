@@ -6,13 +6,13 @@ from decimal import Decimal
 
 from nautilus_trader.model.enums import OrderSide
 
-from quant_runtime.formal.china_market_rules import (
+from quant_runtime.formal.nautilus.china_market_rules import (
     AShareRuleBook,
     FeeSpec,
     calculate_fee,
 )
-from quant_runtime.markethub.catalog import CanonicalInstrument
-from quant_runtime.markethub.daily_data import CanonicalBar, CanonicalDataset
+from quant_runtime.market_data.markethub.catalog import CanonicalInstrument
+from quant_runtime.market_data.markethub.daily_data import CanonicalBar, CanonicalDataset
 
 
 def fee_spec() -> FeeSpec:

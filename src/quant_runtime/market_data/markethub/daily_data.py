@@ -7,8 +7,6 @@ from decimal import Decimal
 from hashlib import sha256
 from typing import Any
 
-import pandas as pd
-
 from quant_runtime.contracts.canonical_hash import canonical_json, normalize_decimal
 
 from .catalog import CanonicalInstrument
@@ -139,29 +137,6 @@ class CanonicalDataset:
             "bars": [item.hash_record() for item in self.bars],
         }
         return sha256(canonical_json(value)).hexdigest()
-
-    def to_qlib_frame(self) -> pd.DataFrame:
-        records = [
-            {
-                "datetime": pd.Timestamp(item.trading_day),
-                "instrument": item.instrument,
-                "open": float(item.open),
-                "high": float(item.high),
-                "low": float(item.low),
-                "close": float(item.close),
-                "volume": float(item.volume),
-                "amount": float(item.amount),
-                "pre_close": float(item.pre_close),
-                "is_suspended": item.is_suspended,
-                "is_st": item.is_st,
-            }
-            for item in self.bars
-        ]
-        if not records:
-            raise ValueError("canonical dataset has no bars")
-        frame = pd.DataFrame.from_records(records).set_index(["datetime", "instrument"])
-        frame.index = frame.index.set_names(["datetime", "instrument"])
-        return frame.sort_index()
 
 
 def _decimal(value: Any, *, fallback: Decimal | None = None) -> Decimal:

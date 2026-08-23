@@ -6,7 +6,7 @@ from nautilus_trader.model.instruments import Equity
 from nautilus_trader.model.objects import Price, Quantity
 
 from quant_runtime.contracts.canonical_hash import normalize_decimal
-from quant_runtime.markethub.catalog import CanonicalInstrument
+from quant_runtime.market_data.markethub.catalog import CanonicalInstrument
 
 VENUE = Venue("XCN")
 

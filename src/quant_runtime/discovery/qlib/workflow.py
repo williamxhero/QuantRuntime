@@ -13,8 +13,8 @@ import qlib
 
 from quant_runtime.contracts.canonical_hash import read_json
 from quant_runtime.contracts.strategy_spec import StrategySpec, resolve_strategy_path
-from quant_runtime.markethub.client import MarketHubClient
-from quant_runtime.markethub.daily_data import CanonicalDataset
+from quant_runtime.market_data.markethub.client import MarketHubClient
+from quant_runtime.market_data.markethub.daily_data import CanonicalDataset
 
 from .candidate_builder import select_top_k
 from .metrics import qlib_risk, rank_ic

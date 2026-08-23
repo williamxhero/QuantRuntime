@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from quant_runtime.markethub.client import MarketHubClient
+from quant_runtime.market_data.markethub.client import MarketHubClient
 
 
 class FixtureTransport:

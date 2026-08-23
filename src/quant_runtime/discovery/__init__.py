@@ -1,1 +1,1 @@
-"""Qlib candidate-discovery runtime."""
+"""Candidate-discovery framework adapters."""

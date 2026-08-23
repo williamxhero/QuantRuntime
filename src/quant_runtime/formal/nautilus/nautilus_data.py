@@ -10,7 +10,7 @@ from nautilus_trader.model.instruments import Equity
 from nautilus_trader.model.objects import Quantity
 
 from quant_runtime.contracts.canonical_hash import normalize_decimal
-from quant_runtime.markethub.daily_data import CanonicalDataset
+from quant_runtime.market_data.markethub.daily_data import CanonicalDataset
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 

@@ -1,6 +1,6 @@
 {
   "schema": "quant-runtime.formal-config.v1",
-  "strategy_spec": "../strategies/cross-sectional-momentum-topk.json",
+  "strategy_spec": "../../strategies/cross-sectional-momentum-topk.json",
   "market_hub": {
     "base_url": "http://yosef-server:8803",
     "timeout_seconds": 60.0,

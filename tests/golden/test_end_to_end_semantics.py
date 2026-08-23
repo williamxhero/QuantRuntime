@@ -5,12 +5,12 @@ from pathlib import Path
 
 from conftest import FixtureTransport
 
-from quant_runtime.discovery.candidate_manifest import write_candidate_run
-from quant_runtime.discovery.workflow import DiscoveryConfig, run_discovery
-from quant_runtime.formal import runner as formal_runner
-from quant_runtime.formal.runner import FormalConfig, run_engine
-from quant_runtime.formal.strategies import MomentumTopKStrategy
-from quant_runtime.markethub.client import MarketHubClient
+from quant_runtime.discovery.qlib.candidate_manifest import write_candidate_run
+from quant_runtime.discovery.qlib.workflow import DiscoveryConfig, run_discovery
+from quant_runtime.formal.nautilus import runner as formal_runner
+from quant_runtime.formal.nautilus.runner import FormalConfig, run_engine
+from quant_runtime.formal.nautilus.strategies import MomentumTopKStrategy
+from quant_runtime.market_data.markethub.client import MarketHubClient
 from quant_runtime.semantics.golden_compare import compare_manifests
 
 ROOT = Path(__file__).parents[2]
@@ -22,7 +22,9 @@ def test_fixture_discover_evaluate_and_golden_check_match(
     s_fixture,
     tmp_path: Path,
 ) -> None:
-    discovery_config = DiscoveryConfig.load(ROOT / "configs" / "discovery" / "s-momentum.json")
+    discovery_config = DiscoveryConfig.load(
+        ROOT / "configs" / "discovery" / "qlib" / "s-momentum.json"
+    )
     discovery = run_discovery(discovery_config, client_factory=lambda _: fixture_client)
     candidate, candidate_path = write_candidate_run(
         discovery_config, discovery, tmp_path / "candidate"
@@ -34,7 +36,7 @@ def test_fixture_discover_evaluate_and_golden_check_match(
     )
     formal, formal_path = formal_runner.evaluate_candidate(
         candidate_path,
-        ROOT / "configs" / "formal" / "s-momentum.json",
+        ROOT / "configs" / "formal" / "nautilus" / "s-momentum.json",
         tmp_path / "formal",
     )
     report = compare_manifests(candidate_path, formal_path)
@@ -54,7 +56,7 @@ def test_formal_engine_has_no_candidate_or_reference_injection(
     assert "candidate" not in parameters
     assert "reference" not in parameters
     assert "dataset" not in parameters
-    config = FormalConfig.load(ROOT / "configs" / "formal" / "s-momentum.json")
+    config = FormalConfig.load(ROOT / "configs" / "formal" / "nautilus" / "s-momentum.json")
     results = [
         run_engine(canonical_dataset, config, tmp_path / f"formal-{index}") for index in range(3)
     ]

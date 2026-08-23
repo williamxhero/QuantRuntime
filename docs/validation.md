@@ -1,5 +1,10 @@
 # Validation evidence and limits
 
+The current reproducible S configurations live at
+`configs/discovery/qlib/s-momentum.json` and `configs/formal/nautilus/s-momentum.json`. The connected
+gate exercises the Qlib adapter, the default formal runtime registry selection, the Nautilus native
+engine, and the neutral manifest/golden contracts against the live MarketHub service.
+
 On 2026-08-23 three complete live two-stock workflows ran over January 2025 MarketHub data. Every
 workflow completed `discover`, `evaluate`, and `golden-check` with stable identities:
 
@@ -27,3 +32,8 @@ CSV files can contain upstream-generated event UUIDs, so semantic determinism is
 the canonical identities and normalized output rather than requiring native report bytes to match.
 The pinned Qlib dependency also emits an upstream Gym deprecation notice under NumPy 2; it does not
 change command exit status or the final machine-readable JSON line.
+
+The validation identities above remain historical evidence for the exact configuration bytes used
+by those runs. Moving the configuration files under framework-specific directories required changing
+their relative `strategy_spec` paths, so a new run receives new config hashes and run IDs by design;
+the canonical strategy, data, decision, manifest schema, and hash algorithms are unchanged.

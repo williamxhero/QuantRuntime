@@ -1,6 +1,6 @@
 # Quant Runtime
 
-Quant Runtime is one independent Python 3.12 product with two framework paths over the same
+Quant Runtime is one independent Python 3.12 product with framework adapters over the same
 MarketHub data and strategy contracts:
 
 - Qlib performs fast candidate discovery and emits native IC/risk evidence.
@@ -8,7 +8,29 @@ MarketHub data and strategy contracts:
   orders, fills, positions, account, fees, and statistics.
 
 It can be used without Apex Research. MarketHub is its only production market-data source, and raw
-bars remain in memory.
+bars remain in memory. Research control planes remain outside this repository and communicate only
+through the CLI and neutral manifests, so Apex Research can be replaced or multiple research
+systems can consume the same runtime evidence.
+
+## Package layout
+
+```text
+src/quant_runtime/
+├─ application/             # discover/evaluate/golden-check use-case orchestration
+├─ contracts/               # neutral manifests, strategy spec, hashes, artifacts
+├─ market_data/
+│  └─ markethub/            # sole production data-source adapter + canonical dataset
+├─ discovery/
+│  └─ qlib/                 # Qlib-native discovery implementation
+├─ formal/
+│  ├─ interface.py          # neutral FormalRuntime seam
+│  ├─ registry.py           # available formal runtime adapters
+│  └─ nautilus/             # NautilusTrader-native formal implementation
+└─ semantics/               # shared decision semantics and golden comparison
+```
+
+A future LEAN integration belongs beside Nautilus as `formal/lean/` and implements the same small
+formal runtime seam. No LEAN placeholder, dependency, matcher, or execution model exists today.
 
 ## Commands
 
@@ -16,12 +38,19 @@ bars remain in memory.
 uv sync --python 3.12 --extra dev
 
 uv run quant-runtime discover `
-  --config configs/discovery/s-momentum.json `
+  --config configs/discovery/qlib/s-momentum.json `
   --output runtime/discovery-1
 
 uv run quant-runtime evaluate `
   --candidate-manifest runtime/discovery-1/candidate_manifest.json `
-  --config configs/formal/s-momentum.json `
+  --config configs/formal/nautilus/s-momentum.json `
+  --output runtime/formal-1
+
+# Optional today; the default remains nautilus.
+uv run quant-runtime evaluate `
+  --runtime nautilus `
+  --candidate-manifest runtime/discovery-1/candidate_manifest.json `
+  --config configs/formal/nautilus/s-momentum.json `
   --output runtime/formal-1
 
 uv run quant-runtime golden-check `

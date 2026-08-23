@@ -6,7 +6,8 @@ from datetime import date
 import pytest
 from conftest import FixtureTransport
 
-from quant_runtime.markethub.client import MarketHubClient, MarketHubContractError
+from quant_runtime.discovery.qlib.qlib_loader import load_frame
+from quant_runtime.market_data.markethub.client import MarketHubClient, MarketHubContractError
 
 
 def test_shared_dataset_is_canonical_and_qlib_ready(canonical_dataset) -> None:
@@ -14,7 +15,7 @@ def test_shared_dataset_is_canonical_and_qlib_ready(canonical_dataset) -> None:
     assert canonical_dataset.dataset_version == "fixture-daily-v1"
     assert len(canonical_dataset.bars) == 14
     assert len(canonical_dataset.input_hash) == 64
-    frame = canonical_dataset.to_qlib_frame()
+    frame = load_frame(canonical_dataset)
     assert frame.index.names == ["datetime", "instrument"]
     assert frame.index.is_monotonic_increasing
 

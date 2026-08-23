@@ -1,5 +1,10 @@
 # Public manifests
 
+These manifests are neutral process-boundary contracts. Apex Research is one possible external
+consumer, not a dependency or namespace owner; another research control plane can replace it, and
+multiple consumers can independently verify the same artifacts. Selecting `evaluate --runtime`
+changes the formal adapter only and does not change the manifest schema or CLI stdout shape.
+
 ## Candidate
 
 ```json
@@ -68,6 +73,7 @@ Rank IC, candidates, risk analysis, and a native-capability recorder export.
 }
 ```
 
-The formal artifacts are Nautilus native orders, fills, positions, account, statistics, the
+The current formal artifacts are Nautilus native orders, fills, positions, account, statistics, the
 runtime decision envelope, and the normalized formal output. `semantic_match` is false if any
-lineage or decision identity differs.
+lineage or decision identity differs. Future formal adapters must preserve these neutral identity
+fields while keeping their framework-native reports inside the adapter boundary.

@@ -9,8 +9,8 @@ from nautilus_trader.model.currencies import CNY
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.objects import Money
 
-from quant_runtime.markethub.catalog import CanonicalInstrument
-from quant_runtime.markethub.daily_data import CanonicalBar, CanonicalDataset
+from quant_runtime.market_data.markethub.catalog import CanonicalInstrument
+from quant_runtime.market_data.markethub.daily_data import CanonicalBar, CanonicalDataset
 
 CENT = Decimal("0.01")
 
