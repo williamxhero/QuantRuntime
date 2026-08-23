@@ -1,0 +1,13 @@
+{
+  "schema": "quant-runtime.strategy-spec.v1",
+  "strategy_id": "cross-sectional-momentum-topk",
+  "revision": "1",
+  "parameters": {
+    "lookback_days": 3,
+    "top_k": 1,
+    "rebalance_frequency": "daily"
+  },
+  "signal_timing": "close",
+  "execution_timing": "next_open",
+  "price_adjustment": "none"
+}

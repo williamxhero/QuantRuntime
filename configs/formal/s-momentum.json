@@ -1,0 +1,29 @@
+{
+  "schema": "quant-runtime.formal-config.v1",
+  "strategy_spec": "../strategies/cross-sectional-momentum-topk.json",
+  "market_hub": {
+    "base_url": "http://yosef-server:8803",
+    "timeout_seconds": 60.0,
+    "page_size": 50000
+  },
+  "universe": {
+    "kind": "instruments",
+    "instruments": ["SH.600000", "SZ.000001"]
+  },
+  "start_date": "2025-01-01",
+  "end_date": "2025-01-31",
+  "execution": {
+    "initial_cash_cny": "1000000.00",
+    "lot_size": 100,
+    "tick_size": "0.01",
+    "slippage_bps": "0",
+    "fees": {
+      "commission_rate": "0.0003",
+      "minimum_commission_cny": "5.00",
+      "sell_stamp_duty_rate": "0.0005",
+      "currency_precision": 2,
+      "rounding_mode": "half_away_from_zero",
+      "rounding_scope": "per_fill"
+    }
+  }
+}
