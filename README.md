@@ -26,6 +26,10 @@ uv sync --python 3.12 --extra dev
 uv run python -m markethub_nautilus.cli run `
   --config configs/s-validation.json `
   --output runtime/s
+
+uv run python -m markethub_nautilus.cli run `
+  --config configs/cross-sectional-momentum-topk.s.json `
+  --output runtime/momentum-s
 ```
 
 The last stdout line is one compact JSON object:
@@ -37,6 +41,16 @@ The last stdout line is one compact JSON object:
 The validation config is the frozen S rule-seam scenario. Its `rule_overrides` are explicit test
 conditions, not claims about historical MarketHub state. Production configs must omit them and
 leave `allow_rule_overrides` false.
+
+The momentum config is a formal neutral strategy contract. The Nautilus strategy computes
+`close_t / close_(t-lookback) - 1` from bars observed by `on_bar`, ranks by score descending then
+instrument ascending, excludes suspended bars, and rebalances at the next open. It does not
+consume Qlib output or a precomputed target-position series. The emitted
+`strategy_decisions.json` is built from the strategy's runtime decision records.
+
+The manifest `config_hash` is the SHA-256 of the supplied config file's exact bytes.
+`strategy_spec_hash` is independently calculated from the canonical strategy object, and
+`metrics.reference_decision_hash` hashes the canonical runtime decision envelope.
 
 ## Verification
 

@@ -43,7 +43,7 @@ class AShareRuleBook:
         self._bars = {item.identity: item for item in dataset.bars}
         self._overrides = overrides or {}
 
-    def state_for(self, decision: Decision) -> RuleState:
+    def state_for(self, decision: Decision, *, at_open: bool = False) -> RuleState:
         override = self._overrides.get((decision.trading_day, decision.instrument))
         if override is not None:
             return override
@@ -58,8 +58,8 @@ class AShareRuleBook:
                 instrument.delist_date is not None and decision.trading_day > instrument.delist_date
             ),
             suspended=bool(bar and bar.is_suspended),
-            limit_up=bool(bar and _at_price_band(bar, instrument, upper=True)),
-            limit_down=bool(bar and _at_price_band(bar, instrument, upper=False)),
+            limit_up=bool(bar and _at_price_band(bar, instrument, upper=True, at_open=at_open)),
+            limit_down=bool(bar and _at_price_band(bar, instrument, upper=False, at_open=at_open)),
         )
 
 
@@ -68,11 +68,12 @@ def _at_price_band(
     instrument: CanonicalInstrument,
     *,
     upper: bool,
+    at_open: bool,
 ) -> bool:
     rate = _price_limit_rate(instrument, bar)
     factor = Decimal(1) + rate if upper else Decimal(1) - rate
     limit = (bar.pre_close * factor).quantize(instrument.tick_size, rounding=ROUND_HALF_UP)
-    observed = bar.close
+    observed = bar.open if at_open else bar.close
     return observed >= limit if upper else observed <= limit
 
 

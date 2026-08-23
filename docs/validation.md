@@ -26,3 +26,33 @@ their byte hashes differ between otherwise identical runs. The reports are delib
 without rewriting; deterministic acceptance uses the canonical input and normalized semantic
 output hashes. Native account, statistics, and normalized artifact bytes were stable. M/L
 benchmarks were not run.
+
+## Cross-sectional momentum contract
+
+The neutral strategy object is:
+
+```json
+{"parameters":{"lookback_days":3,"top_k":1},"spec_revision":"1","strategy_id":"cross-sectional-momentum-topk"}
+```
+
+Its canonical strategy hash is
+`f06669db3f35dd2096456df51fb69707dea3fd50d53d828bdaff8e7833bccd6d`.
+The offline engine golden compares runtime decisions with a separately computed oracle, while an
+anti-future-leak test removes access to that oracle from the formal engine path.
+
+On 2026-08-23 three real CLI runs over the same January 2025 two-stock window produced:
+
+- 15 runtime decisions from 2025-01-07 through 2025-01-27;
+- cross-framework decision hash
+  `be36c06594f471c74dd67784b918ce14a18e235706e441b5d210ce6bbcfaaff8`;
+- canonical input hash
+  `bdcc2e4f5a3c537dde1868a64ff8915f01a75648daa40860178e8270a8de00d1`;
+- normalized output hash
+  `ceec17c49de7610bc743f1583a33185884881256c3392a8a1e014f7eef038263`;
+- five Nautilus-native orders and five fills, all filled, plus one final-day
+  `no_next_session` strategy guard;
+- engine time 0.0222-0.0244 seconds and post-run RSS 221.9-222.2 MB.
+
+All identity hashes, decision rows, order/fill counts, and normalized semantic outputs were stable
+across the three runs. Upstream-generated native report UUIDs remain outside deterministic byte
+identity, as described above.

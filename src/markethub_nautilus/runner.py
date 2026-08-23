@@ -11,7 +11,7 @@ from .engine import run_engine
 from .manifest import write_manifest
 from .markethub import MarketHubClient
 
-NATIVE_ARTIFACTS = (
+BASE_ARTIFACTS = (
     "native_account.csv",
     "native_fills.csv",
     "native_orders.csv",
@@ -30,7 +30,10 @@ def run(config_path: Path, output_dir: Path) -> tuple[dict[str, Any], Path]:
         config.data.end_date,
     )
     output = run_engine(dataset, config, output_dir)
-    artifact_paths = [output_dir / name for name in NATIVE_ARTIFACTS]
+    artifact_names = list(BASE_ARTIFACTS)
+    if (output_dir / "strategy_decisions.json").exists():
+        artifact_names.append("strategy_decisions.json")
+    artifact_paths = [output_dir / name for name in artifact_names]
     return write_manifest(
         output_dir,
         framework_version=nautilus_trader.__version__,
@@ -41,7 +44,11 @@ def run(config_path: Path, output_dir: Path) -> tuple[dict[str, Any], Path]:
         canonical_input_hash=dataset.input_hash,
         normalized_output_hash=output.output_hash,
         artifact_paths=artifact_paths,
-        metrics={"fetch": client.metrics.as_dict(), "runtime": output.metrics},
+        metrics={
+            "fetch": client.metrics.as_dict(),
+            "reference_decision_hash": output.decision_hash,
+            "runtime": output.metrics,
+        },
     )
 
 

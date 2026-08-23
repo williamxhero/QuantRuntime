@@ -1,0 +1,10 @@
+{
+  "schema": "canonical-strategy-decisions.v1",
+  "strategy_spec_hash": "f06669db3f35dd2096456df51fb69707dea3fd50d53d828bdaff8e7833bccd6d",
+  "decisions": [
+    {"signal_date": "2025-01-07", "instrument": "SZ.000001", "target_weight": "1"},
+    {"signal_date": "2025-01-08", "instrument": "SZ.000001", "target_weight": "1"},
+    {"signal_date": "2025-01-09", "instrument": "SZ.000001", "target_weight": "1"},
+    {"signal_date": "2025-01-10", "instrument": "SZ.000001", "target_weight": "1"}
+  ]
+}

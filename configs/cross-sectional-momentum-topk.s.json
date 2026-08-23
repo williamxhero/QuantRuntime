@@ -1,0 +1,31 @@
+{
+  "schema": "markethub-nautilus.run-config.v1",
+  "data": {
+    "base_url": "http://yosef-server:8803",
+    "start": "2025-01-01",
+    "end": "2025-01-31",
+    "instruments": ["SH.600000", "SZ.000001"]
+  },
+  "strategy": {
+    "strategy_id": "cross-sectional-momentum-topk",
+    "spec_revision": "1",
+    "parameters": {
+      "lookback_days": 3,
+      "top_k": 1
+    }
+  },
+  "execution": {
+    "initial_cash_cny": "1000000.00",
+    "fill_timing": "next_open",
+    "lot_size": 100,
+    "tick_size": "0.01",
+    "fees": {
+      "commission_rate": "0.0003",
+      "minimum_commission_cny": "5.00",
+      "sell_stamp_duty_rate": "0.0005",
+      "currency_precision": 2,
+      "rounding_mode": "half_away_from_zero",
+      "rounding_scope": "per_fill"
+    }
+  }
+}

@@ -21,10 +21,12 @@ from nautilus_trader.model.identifiers import InstrumentId, Symbol, Venue
 from nautilus_trader.model.instruments import Equity
 from nautilus_trader.model.objects import Money, Price, Quantity
 
-from .canonical import CanonicalDataset, normalize_decimal
+from .canonical import CanonicalDataset, canonical_json, normalize_decimal
 from .china_rules import AShareFeeModel, AShareRuleBook
 from .config import RunConfig
 from .evidence import NormalizedOutput, normalize_value
+from .momentum import MomentumReference
+from .momentum_strategy import MomentumTopKStrategy
 from .strategy import DecisionStrategy
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
@@ -89,18 +91,45 @@ def run_engine(dataset: CanonicalDataset, config: RunConfig, output_dir: Path) -
             engine.add_data(bars, sort=False)
         engine.sort_data()
         injection_seconds = perf_counter() - inject_started
-        strategy = DecisionStrategy(
-            config.strategy,
-            bar_types,
-            dataset.trading_days,
-            canonical_by_native,
-            {key: value.id for key, value in native_by_canonical.items()},
-            AShareRuleBook(dataset, config.strategy.rule_overrides),
-        )
+        native_ids = {key: value.id for key, value in native_by_canonical.items()}
+        rule_book = AShareRuleBook(dataset, config.strategy.rule_overrides)
+        is_momentum = config.strategy.kind == "cross_sectional_momentum_topk"
+        if is_momentum:
+            strategy = MomentumTopKStrategy(
+                config.strategy,
+                dataset.trading_days,
+                bar_types,
+                canonical_by_native,
+                native_ids,
+                rule_book,
+                frozenset(
+                    (bar.trading_day, bar.instrument) for bar in dataset.bars if bar.is_suspended
+                ),
+            )
+        else:
+            strategy = DecisionStrategy(
+                config.strategy,
+                bar_types,
+                dataset.trading_days,
+                canonical_by_native,
+                native_ids,
+                rule_book,
+            )
         engine.add_strategy(strategy)
         run_started = perf_counter()
         engine.run()
         run_seconds = perf_counter() - run_started
+        if is_momentum:
+            runtime_reference = MomentumReference(
+                strategy_spec_hash=config.strategy.spec_hash,
+                decisions=tuple(strategy.runtime_decisions),
+            )
+            decision_hash = runtime_reference.decision_hash
+            (output_dir / "strategy_decisions.json").write_bytes(
+                canonical_json(runtime_reference.envelope()) + b"\n"
+            )
+        else:
+            decision_hash = config.strategy.decision_hash
         result = engine.get_result()
         orders = engine.trader.generate_orders_report()
         fills = engine.trader.generate_fills_report()
@@ -126,7 +155,7 @@ def run_engine(dataset: CanonicalDataset, config: RunConfig, output_dir: Path) -
             data_version=dataset.data_version,
             canonical_input_hash=dataset.input_hash,
             strategy_spec_hash=config.strategy.spec_hash,
-            decision_hash=config.strategy.decision_hash,
+            decision_hash=decision_hash,
             decisions=strategy.decision_records,
             orders=strategy.order_records,
             rejects=strategy.reject_records,

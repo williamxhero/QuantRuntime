@@ -1,12 +1,16 @@
 import json
 from decimal import Decimal
+from hashlib import sha256
+from inspect import signature
 from pathlib import Path
 
 import pytest
 
-from markethub_nautilus import runner
+from markethub_nautilus import momentum, runner
 from markethub_nautilus.engine import run_engine
 from markethub_nautilus.markethub import FetchMetrics
+from markethub_nautilus.momentum import build_momentum_reference
+from markethub_nautilus.momentum_strategy import MomentumTopKStrategy
 
 ROOT = Path(__file__).parents[2]
 
@@ -67,3 +71,56 @@ def test_runner_writes_success_manifest_with_all_native_artifacts(
         "native_statistics.json",
         "normalized_output.json",
     }
+
+
+@pytest.mark.engine
+@pytest.mark.golden
+def test_momentum_strategy_computes_reference_and_executes_with_native_engine(
+    monkeypatch, tmp_path: Path, momentum_s_dataset
+) -> None:
+    config = runner.RunConfig.load(ROOT / "configs" / "cross-sectional-momentum-topk.s.json")
+    expected = build_momentum_reference(momentum_s_dataset, config.strategy)
+    assert "reference" not in signature(MomentumTopKStrategy).parameters
+    assert "dataset" not in signature(MomentumTopKStrategy).parameters
+
+    def forbidden_oracle(*args, **kwargs):
+        raise AssertionError("the formal engine path must not consume the offline oracle")
+
+    monkeypatch.setattr(momentum, "build_momentum_reference", forbidden_oracle)
+    outputs = [
+        run_engine(momentum_s_dataset, config, tmp_path / f"momentum-{index}") for index in range(3)
+    ]
+    assert expected.decision_hash == (
+        "5446b519590fc2e047ea3dae7d24c3edfca1cb923c705d341652d8c40e038439"
+    )
+    assert outputs[0].decisions == [item.as_dict() for item in expected.decisions]
+    assert outputs[0].fills
+    assert len({output.output_hash for output in outputs}) == 1
+    for index in range(3):
+        artifact = tmp_path / f"momentum-{index}" / "strategy_decisions.json"
+        assert json.loads(artifact.read_text()) == expected.envelope()
+
+
+@pytest.mark.engine
+def test_momentum_runner_indexes_reference_contract(
+    monkeypatch, tmp_path: Path, momentum_s_dataset
+) -> None:
+    class FixtureClient:
+        def __init__(self, base_url: str) -> None:
+            self.base_url = base_url
+            self.metrics = FetchMetrics()
+
+        def fetch_dataset(self, instruments, start_date, end_date):
+            return momentum_s_dataset
+
+    monkeypatch.setattr(runner, "MarketHubClient", FixtureClient)
+    config_path = ROOT / "configs" / "cross-sectional-momentum-topk.s.json"
+    manifest, _ = runner.run(config_path, tmp_path)
+    assert manifest["config_hash"] == sha256(config_path.read_bytes()).hexdigest()
+    assert manifest["strategy_spec_hash"] == (
+        "f06669db3f35dd2096456df51fb69707dea3fd50d53d828bdaff8e7833bccd6d"
+    )
+    assert manifest["metrics"]["reference_decision_hash"] == (
+        "5446b519590fc2e047ea3dae7d24c3edfca1cb923c705d341652d8c40e038439"
+    )
+    assert "strategy_decisions.json" in {item["relative_path"] for item in manifest["artifacts"]}
