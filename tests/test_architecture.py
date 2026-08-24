@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+from quant_runtime.package import StrategyPackage
 from quant_runtime.registry import production_registry
 
 ROOT = Path(__file__).parents[1]
@@ -28,3 +31,18 @@ def test_legacy_workspace_and_manifest_ownership_is_gone() -> None:
     assert not (source / "contracts" / "candidate_manifest.py").exists()
     assert not (source / "contracts" / "formal_manifest.py").exists()
     assert not list((ROOT / "strategies").rglob("strategy.toml"))
+
+
+def test_strategy_package_requires_an_explicit_materialized_root(tmp_path: Path) -> None:
+    source_path = tmp_path / "diagnostic-source"
+    source_path.mkdir()
+    record = {
+        "package_ref": {"strategy_id": "fixture", "revision": 1, "package_hash": "a" * 64},
+        "manifest": {"strategy_id": "fixture", "revision": 1},
+        "source_path": str(source_path),
+    }
+
+    with pytest.raises(TypeError, match="root"):
+        StrategyPackage.from_record(record)  # type: ignore[call-arg]
+    with pytest.raises(ValueError, match="not materialized"):
+        StrategyPackage.from_record(record, root=tmp_path / "missing")

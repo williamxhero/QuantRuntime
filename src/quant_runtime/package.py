@@ -16,13 +16,12 @@ class StrategyPackage:
     manifest: dict[str, Any]
 
     @classmethod
-    def from_record(cls, record: dict[str, Any], root: Path | None = None) -> StrategyPackage:
+    def from_record(cls, record: dict[str, Any], root: Path) -> StrategyPackage:
         package_ref = record.get("package_ref")
         manifest = record.get("manifest")
         if not isinstance(package_ref, dict) or not isinstance(manifest, dict):
             raise ValueError("workspace package record lacks package_ref or manifest")
-        source = root or Path(str(record.get("source_path", "")))
-        source = source.resolve()
+        source = Path(root).resolve()
         if not source.is_dir():
             raise ValueError("registered strategy package is not materialized for execution")
         if manifest.get("strategy_id") != package_ref.get("strategy_id") or manifest.get(

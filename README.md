@@ -26,6 +26,7 @@ Workspace implementation.
 ## CLI
 
 The CLI only exposes run lifecycle operations and prints exactly one JSON document to stdout.
+Usage and parse errors use the same JSON boundary; `--help` remains conventional text help.
 
 ```powershell
 uv run quant-runtime run `

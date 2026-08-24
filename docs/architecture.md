@@ -49,6 +49,8 @@ retry. `WorkspaceClient.retry_run` is the only path to a fresh attempt for the s
 `adapters/data/markethub`, `adapters/discovery/qlib`, and `adapters/formal/nautilus` contain the actual
 integrations and their engine-facing models. Legacy parallel `market_data`, `discovery`, and `formal`
 trees no longer exist. Package entrypoints are loaded from verified Workspace package tar artifacts.
+The package loader requires the executor to pass that explicit materialized directory; it never
+falls back to Workspace's diagnostic `source_path` field.
 
 Qlib discovery remains optional and produces only native discovery evidence. Every formal leg starts
 from the same frozen snapshot and independently owns orders, fills, positions, account state, fees,

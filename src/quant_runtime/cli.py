@@ -4,7 +4,7 @@ import argparse
 import json
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from strategy_workspace import WorkspaceClient, WorkspaceWorker
 
@@ -13,8 +13,17 @@ from quant_runtime.executor import RuntimeExecutor
 DEFAULT_WORKSPACE = Path(r"D:\WILL\STOCK\QuantResearch\runtime\workspace")
 
 
+class CliUsageError(ValueError):
+    pass
+
+
+class JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> NoReturn:
+        raise CliUsageError(message)
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="quant-runtime")
+    parser = JsonArgumentParser(prog="quant-runtime")
     commands = parser.add_subparsers(dest="command", required=True)
 
     run = commands.add_parser("run", help="submit and execute a Workspace run request")
@@ -29,14 +38,24 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    arguments = build_parser().parse_args(argv)
     try:
+        arguments = build_parser().parse_args(argv)
         if arguments.command == "run":
             run = _run(arguments.workspace, arguments.request, arguments.package)
         else:
             run = _retry(arguments.workspace, arguments.request_id)
         payload = _stdout_payload(run)
         exit_code = 0 if run["status"] in {"completed", "rejected"} else 1
+    except CliUsageError as exc:
+        payload = {
+            "status": "failed",
+            "error": {
+                "code": "quant_runtime_cli_usage",
+                "message": str(exc),
+                "exception_type": type(exc).__name__,
+            },
+        }
+        exit_code = 2
     except Exception as exc:
         payload = {
             "status": "failed",

@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from zipfile import ZipFile
 
+import pytest
 from conftest import PACKAGE, ROOT
 from test_executor_topologies import request, snapshot
 
@@ -69,6 +70,33 @@ def test_cli_only_exposes_run_and_retry_with_strict_json_stdout(
         "result": {"outcome": "completed"},
         "error": None,
     }
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [[], ["unknown"], ["run"], ["retry", "--request-id", "run-1", "--bogus"]],
+)
+def test_cli_usage_errors_are_one_json_document(
+    arguments: list[str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert cli.main(arguments) == 2
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert len(captured.out.splitlines()) == 1
+    payload = json.loads(captured.out)
+    assert payload["status"] == "failed"
+    assert payload["error"]["code"] == "quant_runtime_cli_usage"
+
+
+def test_cli_help_remains_normal_text(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli.main(["--help"])
+
+    captured = capsys.readouterr()
+    assert raised.value.code == 0
+    assert captured.out.startswith("usage: quant-runtime")
+    assert captured.err == ""
 
 
 def test_wheel_contains_only_runtime_execution_ownership(tmp_path: Path) -> None:
