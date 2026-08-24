@@ -4,11 +4,15 @@ import json
 from copy import deepcopy
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from quant_runtime.market_data.markethub.client import MarketHubClient
+from quant_runtime.adapters.data.markethub import MarketHubClient
+
+ROOT = Path(__file__).parents[1]
+PACKAGE = ROOT / "tests" / "fixtures" / "noop-strategy"
 
 
 class FixtureTransport:
@@ -17,14 +21,7 @@ class FixtureTransport:
         self.daily_page_index = 0
         self.health_reads = 0
 
-    def request_json(
-        self,
-        method: str,
-        path: str,
-        *,
-        query: dict[str, Any] | None = None,
-        body: dict[str, Any] | None = None,
-    ) -> tuple[Any, int, float]:
+    def request_json(self, method, path, *, query=None, body=None):
         del query
         if method == "GET" and path == "/api/health":
             self.health_reads += 1
@@ -34,7 +31,7 @@ class FixtureTransport:
         elif method == "GET" and path == "/api/markets/calendar/trading":
             value = self.fixture["calendar"]
         elif method == "POST" and path == "/api/stocks/quotes/daily-window/query":
-            expected = None if self.daily_page_index == 0 else "opaque-page-2"
+            expected = None if self.daily_page_index == 0 else "page-2"
             assert (body or {}).get("cursor") == expected
             value = self.fixture["daily_pages"][self.daily_page_index]
             self.daily_page_index += 1
@@ -45,20 +42,9 @@ class FixtureTransport:
 
 
 @pytest.fixture
-def s_fixture() -> dict[str, Any]:
-    days = [
-        "2025-01-02",
-        "2025-01-03",
-        "2025-01-06",
-        "2025-01-07",
-        "2025-01-08",
-        "2025-01-09",
-        "2025-01-10",
-    ]
-    prices = {
-        "000001": ["10.1", "10.3", "10.5", "10.6", "10.8", "10.9", "11.1"],
-        "600000": ["19.8", "19.9", "19.5", "19.8", "19.3", "19.7", "19.1"],
-    }
+def market_fixture() -> dict[str, Any]:
+    days = ["2025-01-02", "2025-01-03", "2025-01-06"]
+    prices = {"000001": ["10.1", "10.3", "10.5"], "600000": ["19.8", "19.9", "19.5"]}
     items = []
     for index, trading_day in enumerate(days):
         for code in ("000001", "600000"):
@@ -80,7 +66,7 @@ def s_fixture() -> dict[str, Any]:
                 }
             )
 
-    def meta(page_size: int, cursor: str | None) -> dict[str, Any]:
+    def meta(size: int, cursor: str | None) -> dict[str, Any]:
         return {
             "data_version": "fixture-global-v1",
             "dataset_version": "fixture-daily-v1",
@@ -90,7 +76,7 @@ def s_fixture() -> dict[str, Any]:
             "page_complete": True,
             "request_complete": True,
             "delivery_complete": True,
-            "returned_rows": page_size,
+            "returned_rows": size,
             "total_rows": len(items),
             "next_cursor": cursor,
             "coverage": [
@@ -98,8 +84,8 @@ def s_fixture() -> dict[str, Any]:
                     "code": code,
                     "complete": True,
                     "missing_rows": 0,
-                    "expected_rows": 7,
-                    "actual_rows": 7,
+                    "expected_rows": 3,
+                    "actual_rows": 3,
                 }
                 for code in ("000001", "600000")
             ],
@@ -117,22 +103,19 @@ def s_fixture() -> dict[str, Any]:
         ],
         "calendar": [{"trade_date": value, "is_open": True} for value in days],
         "daily_pages": [
-            {"items": items[:8], "meta": meta(8, "opaque-page-2")},
-            {"items": items[8:], "meta": meta(6, None)},
+            {"items": items[:4], "meta": meta(4, "page-2")},
+            {"items": items[4:], "meta": meta(2, None)},
         ],
     }
 
 
 @pytest.fixture
-def fixture_client(s_fixture: dict[str, Any]) -> MarketHubClient:
-    return MarketHubClient(transport=FixtureTransport(s_fixture))
+def fixture_client(market_fixture: dict[str, Any]) -> MarketHubClient:
+    return MarketHubClient(transport=FixtureTransport(market_fixture))
 
 
 @pytest.fixture
 def canonical_dataset(fixture_client: MarketHubClient):
     return fixture_client.fetch_dataset(
-        ("SH.600000", "SZ.000001"),
-        date(2025, 1, 1),
-        date(2025, 1, 31),
-        page_size=8,
+        ("SH.600000", "SZ.000001"), date(2025, 1, 1), date(2025, 1, 31), page_size=4
     )
