@@ -1,66 +1,56 @@
 # Architecture
 
-Quant Runtime evolves in place as a neutral Strategy Workspace. The repository and Python package
-names remain unchanged, and the legacy workflow remains a supported compatibility surface.
+Quant Runtime 0.2.0 is an execution worker, not a second control plane.
 
 ```text
-Strategy Package + complete parameters + MarketHub request
-                         |
-                  Strategy Workspace
-       validate_package / resolve_snapshot / run
-                         |
-             +-----------+-----------+
-             |                       |
-      Qlib discovery            Nautilus formal
-      (optional, lineage)       (sole state owner)
-             |                       |
-             +-----------+-----------+
-                         |
-          canonical result + native evidence
+Strategy Workspace
+  package bundle + request.v2 + frozen snapshot
+                     |
+                     v
+              RuntimeExecutor
+       capability resolution + identity
+          /                         \
+ optional Qlib discovery       Nautilus formal leg(s)
+          \                         /
+           result.v2 + native evidence
+                     |
+                     v
+WorkspaceWorker complete / reject / fail attempt
 ```
 
-`sdk/` owns package, parameter, capability, snapshot, decision-intent, run, and result contracts.
-`workspace/` owns validation, deterministic routing, atomic publication, run identity, comparison,
-and evidence indexing. `adapters/` contains role-specific production integrations. The production
-registry declares exactly MarketHub for data, Qlib for discovery, and NautilusTrader for formal
-execution. Synthetic adapters exist only in tests.
+## Ownership boundary
 
-No formal backend is a hidden fallback. `pinned`, `capability_match`, `comparison`, and
-`agreement_gate` resolve against exact capability profiles. Matching ambiguity fails unless the
-request supplies a preference. Every formal backend in a comparison receives the same neutral
-snapshot and runs independently; comparison happens after formal execution and has no reference
-backend. Formal inputs deliberately cannot contain a Qlib candidate.
+Strategy Workspace owns registration, JSON Schemas, parameter validation, request identity, SQLite,
+artifact bytes, run records, attempts, retry, publications, and canonical result validation. Runtime
+accesses those facilities only through `WorkspaceClient` and `WorkspaceWorker`.
 
-## Data authority
+Runtime owns engine capability profiles, deterministic topology resolution, MarketHub consumption,
+Qlib and Nautilus adapters, native engine execution, comparison calculations, runtime identity, and
+evidence production. Its temporary adapter storage is attempt-scoped scratch, never a competing
+Workspace registry or artifact store.
 
-MarketHub remains the sole production authority. A reference snapshot performs a metadata-only
-health read to freeze both MarketHub data and `stock_daily_1d` dataset versions. It reads no bars
-during resolution. `assumed_immutable` describes byte-level trust, not an unknown revision; a later
-bar read must match the frozen revision or fail. `verified_immutable` is emitted only after a full
-validated read.
+The former `quant_runtime.workspace`, bundled Workspace schemas, package-admin CLI, candidate/formal
+manifests, and `discover`/`evaluate`/`golden-check` pipeline were deleted. Runtime never reads legacy
+runtime data. Existing data is intentionally left on disk for external retention or migration.
 
-A materialized snapshot uses the published export mapping and manifest. It downloads only requested
-months' original bars and coverage Parquet bytes, verifies manifest/file hashes, byte and row counts,
-schema, catalog, calendar, and coverage, then atomically publishes an immutable content-addressed
-snapshot. Staging is never authoritative.
+## Runtime identity and attempts
 
-Local cache policy is independent of snapshot authority. `none` writes no cache; `ephemeral` creates
-a verified canonical conversion under staging and removes it after the consumer returns;
-`persistent` stores a content-addressed verified conversion under `.runtime/cache`. The Nautilus
-adapter actually reconstructs and consumes non-`none` caches. Cache manifests record the source
-snapshot, canonical input hash, transform version, file hashes, and `authoritative: false`.
+Workspace `run_id` is the canonical `request_id`. Before engine work, `RuntimeExecutor` binds an
+identity containing the request hash, package ref and parameter hash, full snapshot source/query,
+topology, per-leg config hash, adapter and engine versions, and data read semantics. Output locations
+and attempt scratch paths are excluded.
 
-## Identity and compatibility
+The first execution claims the submitted attempt. `completed` and `rejected` are idempotent terminal
+states. Any exception is recorded with `fail_attempt`; Runtime never silently falls back or creates a
+retry. `WorkspaceClient.retry_run` is the only path to a fresh attempt for the same immutable request.
 
-Workspace run identity binds the package and complete parameter hashes, frozen snapshot and source
-revision, normalized request semantics (including discovery config and cache policy), read method,
-and selected data/discovery/formal adapter and engine capability versions. Only output placement and
-runtime root are excluded. Artifacts use relative paths, SHA-256, and byte counts.
+## Adapter seams
 
-The extracted momentum Strategy Package owns its Qlib and Nautilus entrypoints. The former core
-strategy import remains a compatibility shim. Legacy `discover`, `evaluate`, and `golden-check`
-commands and candidate/formal v1 manifests are unchanged.
+`adapters/data/markethub`, `adapters/discovery/qlib`, and `adapters/formal/nautilus` contain the actual
+integrations and their engine-facing models. Legacy parallel `market_data`, `discovery`, and `formal`
+trees no longer exist. Package entrypoints are loaded from verified Workspace package tar artifacts.
 
-Apex Research is external and untouched. LEAN and ApexTrade are neither connected nor represented by
-empty production directories. Future adapters must enter through the same role contract only when a
-real, tested integration exists.
+Qlib discovery remains optional and produces only native discovery evidence. Every formal leg starts
+from the same frozen snapshot and independently owns orders, fills, positions, account state, fees,
+market rules, and reports. Nautilus strategies derive decisions inside observed-bar callbacks; Qlib
+candidate rows are absent from `FormalRunInput`.

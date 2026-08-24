@@ -1,28 +1,17 @@
-# Validation evidence and limits
+# Validation
 
-Offline verification is authoritative for repository behavior. It covers JSON Schema/package
-contracts, parameter and package hashes, real MarketHub export-manifest shape, reference drift,
-materialized byte/hash/coverage integrity, atomic cleanup, all cache policies and actual cache
-consumption, capability routing, formal-only and discovery+formal topology, post-formal comparison,
-legacy commands/manifests, connected test definitions, and scale/determinism checks.
+Offline tests cover all four topologies, a valid rejected agreement gate, result.v2 shape, package tar
+materialization, request idempotency, explicit retry attempts, runtime identity, Workspace artifact
+lineage, strict JSON CLI output, real Nautilus evidence, observed-bar decisions, MarketHub version
+drift, incomplete/out-of-order delivery, materialized ArtifactRefs, wheel metadata, and deleted legacy
+ownership.
 
-The captured export fixture matches the real `stock_daily_1d` manifest contract:
-`schema_version`, dataset/data versions, range, compression, partition count, and
-`files[{path,url,rows,bytes,sha256}]` with `year=YYYY/month=MM/{bars,coverage}.parquet` paths. Fixture
-Parquet payloads are generated only for offline contract tests; production materialization always
-uses and verifies MarketHub's original bytes.
+The connected gate uses the live MarketHub service on the small computer and remains fail closed. A
+service outage, unpublished dataset, incomplete coverage, or version drift is an operational result,
+not a reason to substitute fixture data. Repository structure and offline functionality do not wait
+for live data readiness.
 
-Connected tests remain fail-closed and are run separately with `pytest -m connected`. As of
-2026-08-24, live MarketHub health is reachable, but the newest rapidly changing `stock_daily_1d`
-dataset reports publication/read-model state `not_ready`. Consequently the live daily read and the
-new workspace connected path are externally blocked. Tests are not skipped and fixtures are not
-substituted; the failure is retained as operational evidence rather than claimed as a pass.
-
-Historical connected validation from 2026-08-23 remains evidence only for its exact versions: Qlib
-discovery and Nautilus formal evaluation completed with matching decision and canonical input hashes.
-It does not prove readiness of the current MarketHub dataset vector.
-
-Run the complete local gate with:
+Run:
 
 ```powershell
 uv run ruff format --check .
@@ -33,4 +22,6 @@ uv build
 git diff --check
 ```
 
-The project has no mypy configuration or mypy dependency, so no type-check command is asserted.
+After `uv build`, inspect the wheel to confirm it includes `quant_runtime` only, declares the normal
+Strategy Workspace version constraint, and contains no Workspace schemas/storage, strategies,
+configs, candidate/formal manifests, or build/runtime state.

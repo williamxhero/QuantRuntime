@@ -1,40 +1,30 @@
 # Contracts
 
-All new contracts are bundled Draft 2020-12 JSON Schemas under `quant_runtime.schemas`:
+The canonical contracts are supplied by `strategy-workspace>=0.1.0,<0.2.0`; Quant Runtime does not
+bundle copies.
 
-| Schema | Purpose |
+| Workspace contract | Runtime use |
 |---|---|
-| `strategy-package.v1` | package identity, requirements, policy, and implementation entrypoints |
-| `runtime-capability.v1` | exact adapter/engine versions and supported capabilities |
-| `market-snapshot-ref.v1` | frozen logical MarketHub reference and trust policy |
-| `market-snapshot.v1` | immutable materialized files and canonical input identity |
-| `workspace-run-request.v1` | package, complete parameters, data, discovery, and formal topology |
-| `run-manifest.v1` | complete run lineage and artifact integrity records |
-| `result.v1` | canonical formal results, comparison, warnings, and incomparable items |
-| `decision-intents.v2` | versioned neutral intent envelope for future cross-layer exchange |
+| `strategy-package.v1` / package ref | load verified package entrypoints from the registered tar ArtifactRef |
+| `workspace-run-request.v2` | immutable package, parameters, snapshot, and execution topology |
+| reference/materialized snapshot v1 | fail-closed MarketHub read or ArtifactRef materialization |
+| runtime capability v1 | vocabulary represented by Runtime's concrete adapter profiles |
+| run attempt / error / manifest | atomic worker lifecycle and evidence lineage |
+| `result.v2` | canonical discovery, formal, comparison, and agreement output |
 
-The first package is `strategies/equity/cross-sectional-momentum`. Its content hash covers the TOML
-manifest, parameter schema, declared discovery/formal implementation files, and explicitly declared
-assets only. Tests, runtime state, and unrelated files do not change package identity.
+`result.v2.formal` is keyed by formal execution id, not adapter name. Each value reports its real
+adapter plus scalar metrics. `discovery` is omitted for formal-only topologies. `comparison` contains
+reference-free pairwise differences; agreement gates add selector values, tolerance policy, gate
+status, and rejection details.
 
-Parameters follow one closed rule: no supplied object means the complete set of schema defaults;
-supplying an object means it must itself be the complete valid object. Partial user objects are not
-merged with defaults. Additional fields and missing fields are rejected.
+Workspace package registration produces a deterministic tar ArtifactRef. Runtime verifies and safely
+extracts it, rejects special/path-traversing entries, and uses the hydrated package record rather than
+the diagnostic source path. This keeps wheel installations independent of any source checkout.
 
-Snapshot identity excludes local cache policy because cache is replaceable, but includes normalized
-query semantics, endpoint contract, calendar and contract mapping, adapter version, trust policy, and
-the available MarketHub data/dataset revision. Materialized identity additionally binds every source
-file hash plus catalog, calendar, coverage, and canonical input hash.
+Reference snapshot identity includes its full source/query and frozen `data_revision`. Runtime reads
+MarketHub with that revision and rejects drift. Materialized metadata and partitions are ArtifactRefs;
+Runtime materializes them through `WorkspaceClient`, verifies content identity, then reconstructs and
+validates the canonical dataset.
 
-Run identity binds all semantic inputs: package/parameter hashes, snapshot ID and source, full
-normalized request topology/configuration, cache policy/read method, and selected capability profile
-versions. Thus configuration or adapter/engine upgrades cannot reuse old evidence.
-
-Formal inputs contain a package, complete parameters, resolved snapshot, output path, formal config,
-and cache conversion details. They contain no discovery candidate. Each formal result preserves both
-canonical positions/fills/account curve/metrics and engine-native evidence. Finite floating metrics
-are compared deterministically; NaN and infinity fail closed as incomparable values.
-
-The existing `quant-runtime.candidate-manifest.v1` and `quant-runtime.formal-manifest.v1` contracts
-remain available through the legacy commands. Workspace schemas do not reinterpret or silently
-migrate those artifacts.
+The legacy `quant-runtime.candidate-manifest.v1`, `quant-runtime.formal-manifest.v1`, strategy spec,
+golden result, and workspace-run-request.v1 contracts are no longer public or accepted.

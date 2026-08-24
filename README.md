@@ -1,117 +1,72 @@
-# Quant Runtime
+# Quant Runtime 0.2.0
 
-Quant Runtime is an independent Python 3.12 Strategy Workspace. It validates versioned strategy
-packages, freezes MarketHub input identity, resolves an explicit execution topology, and preserves
-canonical results beside engine-native evidence.
+Quant Runtime is the Qlib/Nautilus execution plane for
+[`strategy-workspace`](../strategy-workspace). Strategy Workspace owns durable state and public
+contracts; this package resolves real runtime capabilities, reads frozen MarketHub snapshots, runs
+registered package entrypoints, and closes Workspace attempts atomically with canonical results and
+engine-native evidence.
 
-The production registry is deliberately honest and small:
+Production integrations are deliberately honest:
 
-- MarketHub is the only production market-data adapter.
-- Qlib is the only real discovery adapter.
-- NautilusTrader is the only real formal backend.
-- ApexTrade and LEAN are not installed, registered, stubbed, or treated as fallback engines.
-- Apex Research remains an external consumer; this repository neither imports nor modifies it.
+- MarketHub is the only market-data source.
+- Qlib is the only discovery adapter.
+- NautilusTrader is the only formal adapter.
+- LEAN, ApexTrade, and Apex Research are not imported, registered, stubbed, or used as fallbacks.
 
-Legacy `discover`, `evaluate`, and `golden-check` commands and their v1 manifests remain supported.
-
-## Layout
-
-```text
-src/quant_runtime/
-├─ sdk/                    # package, parameter, capability, snapshot, run and result contracts
-├─ schemas/                # bundled Draft 2020-12 JSON Schemas
-├─ workspace/              # validate_package / resolve_snapshot / run
-├─ adapters/
-│  ├─ data/markethub/      # reference/materialized snapshots and cache policy
-│  ├─ discovery/qlib/      # only real discovery adapter
-│  └─ formal/nautilus/     # only real formal backend
-├─ application/            # new and legacy CLI-neutral use cases
-├─ contracts/              # legacy v1 manifest compatibility
-├─ discovery/qlib/         # legacy Qlib workflow compatibility
-├─ formal/nautilus/        # legacy Nautilus workflow and shared public seams
-└─ semantics/              # legacy decision and golden contracts
-
-strategies/equity/cross-sectional-momentum/
-├─ strategy.toml
-├─ parameters.schema.json
-├─ discovery/qlib/pipeline.py
-└─ formal/nautilus/strategy.py
-```
-
-Runtime state is never committed:
-
-```text
-.runtime/
-├─ snapshots/              # immutable reference manifests or materialized authorities
-├─ runs/                   # run manifests, canonical result and engine-native evidence
-├─ evidence/               # run evidence indexes
-├─ cache/                  # explicitly requested non-authoritative cache
-└─ staging/                # atomic publication staging
-```
-
-## Strategy Workspace commands
+## Installation
 
 ```powershell
 uv sync --python 3.12 --extra dev
-
-uv run quant-runtime package-validate `
-  --package strategies/equity/cross-sectional-momentum
-
-# Resolves only the data section. Default reference/assumed reads version metadata, not bars.
-uv run quant-runtime snapshot-resolve `
-  --request configs/workspace/s-momentum.json `
-  --runtime-root .runtime
-
-uv run quant-runtime run `
-  --request configs/workspace/s-momentum.json `
-  --runtime-root .runtime
 ```
 
-User parameters are frozen as one complete closed object. Omitting `--parameters` uses the complete
-schema defaults; supplying a partial override is rejected instead of being silently merged.
+Wheel metadata uses the normal `strategy-workspace>=0.1.0,<0.2.0` dependency. Local development uses
+the sibling checkout through `[tool.uv.sources]`; the built wheel contains neither sibling code nor a
+Workspace implementation.
 
-Formal selection supports `pinned`, `capability_match`, `comparison`, and `agreement_gate`.
-Capability matching never falls back to registry order. Comparison backends run independently on
-the same snapshot, and comparison occurs only after every formal run has completed. A formal input
-contains no Qlib candidate.
+## CLI
 
-## Snapshot and cache policy
-
-`snapshot_mode` and `local_cache` are independent:
-
-- `reference` stores a logical MarketHub identity and freezes the available MarketHub data and daily
-  dataset revisions through a metadata-only health read. Its default trust is `assumed_immutable`;
-  the stronger `verified_immutable` label is emitted only after a real fail-closed bar read.
-- `materialized` resolves MarketHub's real `stock_daily_1d` export mapping and manifest, downloads
-  only intersecting monthly `bars.parquet` and `coverage.parquet` files, verifies manifest bytes,
-  file bytes, row counts, SHA-256 and Parquet schema, and publishes atomically.
-- `none` leaves no cache data.
-- `ephemeral` is consumed from staging and deleted after the backend run while retaining its hash
-  manifest.
-- `persistent` stores and reuses a content-addressed conversion with transform version and hash.
-  Nautilus reconstructs and verifies the exact canonical input from it. It is always marked
-  `authoritative: false`; only the snapshot is authoritative.
-
-## Legacy commands
+The CLI only exposes run lifecycle operations and prints exactly one JSON document to stdout.
 
 ```powershell
-uv run quant-runtime discover `
-  --config configs/discovery/qlib/s-momentum.json `
-  --output runtime/discovery-1
+uv run quant-runtime run `
+  --workspace D:\WILL\STOCK\QuantResearch\runtime\workspace `
+  --request request.json
 
-uv run quant-runtime evaluate `
-  --candidate-manifest runtime/discovery-1/candidate_manifest.json `
-  --config configs/formal/nautilus/s-momentum.json `
-  --output runtime/formal-1
+uv run quant-runtime run `
+  --workspace D:\WILL\STOCK\QuantResearch\runtime\workspace `
+  --package D:\path\to\strategy-package `
+  --request request.json
 
-uv run quant-runtime golden-check `
-  --candidate-manifest runtime/discovery-1/candidate_manifest.json `
-  --formal-manifest runtime/formal-1/formal_manifest.json `
-  --output runtime/golden-1
+uv run quant-runtime retry `
+  --workspace D:\WILL\STOCK\QuantResearch\runtime\workspace `
+  --request-id qrun_...
 ```
 
+`--package` registers the package through `WorkspaceClient.register_package` and replaces the
+request's package ref before submission. Repeating the same request returns the same request/run id.
+A failed request is not retried implicitly; `retry` creates and executes a new attempt.
+
+## Execution contract
+
+The input is `quant-research.workspace-run-request.v2` from Strategy Workspace. It contains a
+registered package ref, complete parameters, a full frozen reference or materialized MarketHub
+snapshot, and one topology:
+
+- `formal_only`
+- `discovery_formal`
+- `formal_comparison`
+- `agreement_gate`
+
+Formal comparison legs are keyed by their execution ids, so the same real Nautilus adapter can run
+independent A/B configurations. Agreement gates compare declared scalar metric selectors with
+absolute and relative tolerances; a failed gate ends as valid `rejected`, not as an execution error.
+
+Reference snapshots verify the frozen MarketHub data and dataset revision before execution and keep
+bars in memory when `local_cache=none`. Materialized snapshots consume only Workspace ArtifactRefs
+and verify every hash, byte count, coverage partition, canonical input hash, calendar, and catalog.
+
 See [architecture](docs/architecture.md), [contracts](docs/contracts.md),
-[validation](docs/validation.md), and the [implementation audit](docs/TODO.md).
+[validation](docs/validation.md), and the [0.2.0 audit](docs/TODO.md).
 
 ## Verification
 
@@ -121,7 +76,5 @@ uv run ruff check .
 uv run pytest -m "not connected"
 uv run pytest -m connected
 uv build
+git diff --check
 ```
-
-Connected tests never replace a MarketHub outage or unpublished dataset with fixtures. Offline
-snapshot contract tests use captured manifest shape and generated Parquet bytes.
