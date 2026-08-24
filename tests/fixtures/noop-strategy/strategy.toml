@@ -1,0 +1,24 @@
+schema = "quant-research.strategy-package.v1"
+strategy_id = "test.observed-bars"
+revision = 1
+display_name = "Observed bars test fixture"
+parameter_schema = "parameters.schema.json"
+
+[pipeline]
+discovery = "optional"
+formal = "required"
+
+[requirements]
+asset_classes = ["equity"]
+frequencies = ["1d"]
+capabilities = ["data.bar.1d"]
+decision_intents = ["target_weight"]
+
+[implementations.discovery]
+qlib = "discovery.py:discover"
+
+[implementations.formal]
+nautilus = "strategy.py:ObservedBarFixtureStrategy"
+
+[dependencies]
+markethub_contract = "v2"
