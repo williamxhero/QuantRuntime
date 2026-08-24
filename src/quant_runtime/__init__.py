@@ -1,3 +1,3 @@
-"""Independent Qlib discovery and NautilusTrader formal runtime."""
+"""Qlib and Nautilus execution plane for Strategy Workspace."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

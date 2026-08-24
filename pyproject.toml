@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "quant-runtime"
-version = "0.1.0"
-description = "Independent Qlib discovery and NautilusTrader formal evaluation runtime"
+version = "0.2.0"
+description = "Qlib and Nautilus execution plane for Strategy Workspace"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
@@ -16,6 +16,7 @@ dependencies = [
   "psutil==7.0.0",
   "pyarrow==25.0.1",
   "pyqlib==0.9.7",
+  "strategy-workspace>=0.1.0,<0.2.0",
 ]
 
 [project.optional-dependencies]
@@ -37,8 +38,10 @@ testpaths = ["tests"]
 markers = [
   "connected: requires the live yosef-server MarketHub endpoint",
   "engine: requires the pinned NautilusTrader runtime",
-  "golden: validates the cross-framework semantic contract",
 ]
+
+[tool.uv.sources]
+strategy-workspace = { path = "../strategy-workspace", editable = true }
 
 [tool.ruff]
 line-length = 100

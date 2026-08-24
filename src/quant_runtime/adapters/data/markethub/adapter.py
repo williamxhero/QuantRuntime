@@ -8,28 +8,23 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-import pyarrow as pa
 import pyarrow.parquet as pq
 
-from quant_runtime.contracts.canonical_hash import (
+from quant_runtime.adapters.data.markethub.catalog import CanonicalInstrument
+from quant_runtime.adapters.data.markethub.client import MarketHubClient, MarketHubContractError
+from quant_runtime.adapters.data.markethub.model import CanonicalBar, CanonicalDataset
+from quant_runtime.artifacts import (
     canonical_json,
     read_json,
     sha256_bytes,
     sha256_value,
     write_json,
 )
-from quant_runtime.market_data.markethub.catalog import CanonicalInstrument
-from quant_runtime.market_data.markethub.client import MarketHubClient, MarketHubContractError
-from quant_runtime.market_data.markethub.daily_data import CanonicalBar, CanonicalDataset
-from quant_runtime.sdk.snapshot_contract import (
-    SnapshotRequest,
-    validate_snapshot_manifest,
-)
-from quant_runtime.workspace.atomic import AtomicDirectory
-from quant_runtime.workspace.layout import RuntimeLayout
+from quant_runtime.atomic import AtomicDirectory
 
 from .cache import MarketHubCache
-from .publication import HttpPublicationSource, PublicationSource, PublishedPartition
+from .contract import SnapshotRequest, validate_snapshot_manifest
+from .storage import AdapterStorage
 
 ADAPTER_VERSION = "1.0.0"
 
@@ -69,6 +64,7 @@ class ResolvedSnapshot:
 
 
 ClientFactory = Callable[[SnapshotRequest], MarketHubClient]
+ArtifactMaterializer = Callable[[str, Path], Path]
 
 
 class MarketHubDataAdapter:
@@ -79,22 +75,87 @@ class MarketHubDataAdapter:
         self,
         *,
         client_factory: ClientFactory | None = None,
-        publication_source: PublicationSource | None = None,
     ) -> None:
         self._client_factory = client_factory or (lambda request: MarketHubClient(request.base_url))
-        self._publication_source = publication_source
 
-    def resolve(self, request: SnapshotRequest, layout: RuntimeLayout) -> ResolvedSnapshot:
+    def resolve(self, request: SnapshotRequest, layout: AdapterStorage) -> ResolvedSnapshot:
         if request.snapshot_mode == "reference":
             return self._reference(request, layout)
-        return self._materialized(request, layout)
+        raise MarketHubContractError(
+            "materialized snapshots must be published as Strategy Workspace ArtifactRefs"
+        )
+
+    def open_snapshot(
+        self,
+        manifest: dict[str, Any],
+        layout: AdapterStorage,
+        *,
+        materialize_artifact: ArtifactMaterializer | None = None,
+    ) -> ResolvedSnapshot:
+        """Open a frozen Workspace snapshot and verify its bytes or MarketHub revision."""
+        validate_snapshot_manifest(manifest)
+        target = layout.snapshots / str(manifest["snapshot_id"]).removeprefix("sha256:")
+        target.mkdir(parents=True, exist_ok=True)
+        manifest_path = write_json(target / "manifest.json", manifest).resolve()
+        if manifest["mode"] == "reference":
+            request = SnapshotRequest.from_manifest(manifest)
+            expected_revision = manifest["source"].get("data_revision")
+            if not isinstance(expected_revision, str) or not expected_revision:
+                raise MarketHubContractError("reference snapshot lacks a frozen data revision")
+            verification = self.read(request, expected_revision=expected_revision)
+            declared = manifest.get("verification")
+            if declared is not None and declared != verification.manifest_value:
+                raise MarketHubContractError("reference snapshot verification drifted")
+            return ResolvedSnapshot(manifest, manifest_path, verification.dataset)
+
+        if materialize_artifact is None:
+            raise MarketHubContractError(
+                "materialized snapshot requires Workspace artifact materialization"
+            )
+        local_metadata = {
+            name: _materialize_ref(
+                manifest[name],
+                target / "metadata" / f"{name}.json",
+                target,
+                materialize_artifact,
+            )
+            for name in ("catalog", "calendar", "coverage")
+        }
+        local_partitions = []
+        for item in manifest["partitions"]:
+            if not isinstance(item, dict) or not isinstance(item.get("artifact"), dict):
+                raise MarketHubContractError("materialized partition lacks an artifact reference")
+            local_partitions.append(
+                {
+                    **_materialize_ref(
+                        item["artifact"],
+                        target / "partitions" / str(item["month"]) / f"{item['kind']}.parquet",
+                        target,
+                        materialize_artifact,
+                    ),
+                    "month": item["month"],
+                    "kind": item["kind"],
+                    "rows": item["rows"],
+                }
+            )
+        dataset = _load_materialized_dataset(
+            target,
+            source=manifest["source"],
+            query=manifest["query"],
+            catalog=local_metadata["catalog"],
+            calendar=local_metadata["calendar"],
+            partitions=local_partitions,
+        )
+        if dataset.input_hash != manifest["canonical_input_hash"]:
+            raise MarketHubContractError("materialized snapshot canonical input hash mismatch")
+        return ResolvedSnapshot(manifest, manifest_path, dataset)
 
     def cache(
         self,
         *,
         policy: str,
         snapshot: ResolvedSnapshot,
-        layout: RuntimeLayout,
+        layout: AdapterStorage,
         consumer: str,
         run_id: str,
         evidence_root: Path,
@@ -145,7 +206,7 @@ class MarketHubDataAdapter:
             )
         return SnapshotVerification(dataset, catalog, calendar, coverage)
 
-    def _reference(self, request: SnapshotRequest, layout: RuntimeLayout) -> ResolvedSnapshot:
+    def _reference(self, request: SnapshotRequest, layout: AdapterStorage) -> ResolvedSnapshot:
         verification = None
         if request.trust_policy == "verified_immutable":
             verification = self.read(request)
@@ -180,104 +241,6 @@ class MarketHubDataAdapter:
         path = self._publish_manifest(layout, snapshot_id, manifest)
         return ResolvedSnapshot(manifest, path, verification.dataset if verification else None)
 
-    def _materialized(self, request: SnapshotRequest, layout: RuntimeLayout) -> ResolvedSnapshot:
-        verification = self.read(request)
-        source = self._source(
-            request,
-            f"{verification.dataset.data_version}:{verification.dataset.dataset_version}",
-        )
-        reference_identity = {
-            **request.identity_payload(),
-            "source": source,
-            "trust_policy": "verified_immutable",
-        }
-        reference_id = f"sha256:{sha256_value(reference_identity)}"
-        publication = self._publication_source or HttpPublicationSource(request.base_url)
-        declared = publication.list_partitions(
-            request,
-            market_data_version=verification.dataset.data_version,
-            dataset_version=verification.dataset.dataset_version,
-        )
-        _validate_partition_catalog(declared, request)
-        with AtomicDirectory(layout.staging) as staging:
-            metadata = self._write_metadata(staging.path, verification)
-            partition_records = []
-            for item in sorted(declared, key=lambda value: (value.month, value.kind)):
-                payload = publication.download(item)
-                _verify_partition(item, payload)
-                relative = Path(item.path)
-                target = staging.path / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(payload)
-                partition_records.append(
-                    {
-                        "path": relative.as_posix(),
-                        "sha256": item.sha256,
-                        "content_bytes": item.content_bytes,
-                        "month": item.month,
-                        "kind": item.kind,
-                        "rows": item.rows,
-                    }
-                )
-            identity = {
-                "source_snapshot_ref": reference_id,
-                "partitions": partition_records,
-                "catalog": metadata["catalog"],
-                "calendar": metadata["calendar"],
-                "coverage": metadata["coverage"],
-            }
-            local_dataset = _load_materialized_dataset(
-                staging.path,
-                source=source,
-                query=request.identity_payload()["query"],
-                catalog=metadata["catalog"],
-                calendar=metadata["calendar"],
-                partitions=partition_records,
-            )
-            identity["canonical_input_hash"] = local_dataset.input_hash
-            snapshot_id = f"sha256:{sha256_value(identity)}"
-            manifest = {
-                "schema": "quant-research.market-snapshot.v1",
-                "snapshot_id": snapshot_id,
-                "mode": "materialized",
-                "source_snapshot_ref": reference_id,
-                "source": source,
-                "query": request.identity_payload()["query"],
-                "calendar": metadata["calendar"],
-                "catalog": metadata["catalog"],
-                "coverage": metadata["coverage"],
-                "partitions": partition_records,
-                "canonical_input_hash": local_dataset.input_hash,
-                "resolved_at": _now(),
-            }
-            validate_snapshot_manifest(manifest)
-            write_json(staging.path / "manifest.json", manifest)
-            final = layout.snapshots / snapshot_id.removeprefix("sha256:")
-            if final.exists():
-                existing = read_json(final / "manifest.json")
-                validate_snapshot_manifest(existing)
-                if existing["snapshot_id"] != snapshot_id:
-                    raise MarketHubContractError("snapshot identity collision")
-                existing_dataset = _load_materialized_dataset(
-                    final,
-                    source=existing["source"],
-                    query=existing["query"],
-                    catalog=existing["catalog"],
-                    calendar=existing["calendar"],
-                    partitions=existing["partitions"],
-                )
-                return ResolvedSnapshot(
-                    existing,
-                    (final / "manifest.json").resolve(),
-                    existing_dataset,
-                )
-            published = staging.publish(final)
-            return ResolvedSnapshot(
-                manifest,
-                (published / "manifest.json").resolve(),
-                local_dataset,
-            )
-
     def _source(
         self,
         request: SnapshotRequest,
@@ -297,7 +260,7 @@ class MarketHubDataAdapter:
 
     def _publish_manifest(
         self,
-        layout: RuntimeLayout,
+        layout: AdapterStorage,
         snapshot_id: str,
         manifest: dict[str, Any],
     ) -> Path:
@@ -312,106 +275,6 @@ class MarketHubDataAdapter:
         with AtomicDirectory(layout.staging, final) as staging:
             write_json(staging.path / "manifest.json", manifest)
             return (staging.publish() / "manifest.json").resolve()
-
-    @staticmethod
-    def _write_metadata(
-        root: Path,
-        verification: SnapshotVerification,
-    ) -> dict[str, dict[str, Any]]:
-        result = {}
-        for name, value in (
-            ("catalog", verification.catalog),
-            ("calendar", verification.calendar),
-            ("coverage", verification.coverage),
-        ):
-            path = write_json(root / f"{name}.json", value)
-            payload = path.read_bytes()
-            result[name] = {
-                "path": path.relative_to(root).as_posix(),
-                "sha256": sha256_bytes(payload),
-                "content_bytes": len(payload),
-            }
-        return result
-
-
-def _validate_partition_catalog(
-    partitions: tuple[PublishedPartition, ...],
-    request: SnapshotRequest,
-) -> None:
-    expected = _months(request)
-    actual = tuple(
-        (item.month, item.kind)
-        for item in sorted(partitions, key=lambda item: (item.month, item.kind))
-    )
-    expected_files = tuple((month, kind) for month in expected for kind in ("bars", "coverage"))
-    if actual != expected_files:
-        raise MarketHubContractError(
-            "published Parquet files do not cover requested bars and coverage: "
-            f"expected={expected_files}, actual={actual}"
-        )
-    if any(
-        item.content_bytes < 1
-        or item.rows < 0
-        or item.kind not in {"bars", "coverage"}
-        or len(item.sha256) != 64
-        or not item.download_url
-        or item.path != f"year={item.month[:4]}/month={item.month[5:]}/{item.kind}.parquet"
-        for item in partitions
-    ):
-        raise MarketHubContractError("published Parquet catalog has incomplete integrity fields")
-
-
-def _verify_partition(partition: PublishedPartition, payload: bytes) -> None:
-    if len(payload) != partition.content_bytes:
-        raise MarketHubContractError(
-            f"published Parquet byte count mismatch for {partition.month}: "
-            f"{len(payload)} != {partition.content_bytes}"
-        )
-    digest = sha256_bytes(payload)
-    if digest != partition.sha256:
-        raise MarketHubContractError(
-            f"published Parquet sha256 mismatch for {partition.month}: {digest}"
-        )
-    try:
-        schema = pq.read_schema(pa.BufferReader(payload))
-        metadata = pq.read_metadata(pa.BufferReader(payload))
-    except Exception as exc:
-        raise MarketHubContractError(
-            f"published partition {partition.month} is not valid Parquet: {exc}"
-        ) from exc
-    required = (
-        {
-            "market",
-            "code",
-            "trade_date",
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-            "amount",
-            "is_suspended",
-            "is_st",
-            "pre_close",
-        }
-        if partition.kind == "bars"
-        else {"market", "code", "expected_rows", "actual_rows", "missing_rows", "complete"}
-    )
-    if not required <= set(schema.names):
-        raise MarketHubContractError(
-            f"published {partition.kind} schema lacks required columns: "
-            f"{sorted(required - set(schema.names))}"
-        )
-    schema_version = (schema.metadata or {}).get(b"schema_version", b"").decode()
-    if schema_version != "markethub-stock-daily-parquet-v1":
-        raise MarketHubContractError(
-            f"published {partition.kind} schema_version is invalid: {schema_version!r}"
-        )
-    if metadata.num_rows != partition.rows:
-        raise MarketHubContractError(
-            f"published {partition.kind} row count mismatch: "
-            f"{metadata.num_rows} != {partition.rows}"
-        )
 
 
 def _load_materialized_dataset(
@@ -551,16 +414,26 @@ def _months_from_query(query: dict[str, Any]) -> tuple[str, ...]:
     return tuple(result)
 
 
-def _months(request: SnapshotRequest) -> tuple[str, ...]:
-    year, month = request.start.year, request.start.month
-    end = request.end.year, request.end.month
-    values = []
-    while (year, month) <= end:
-        values.append(f"{year:04d}-{month:02d}")
-        month += 1
-        if month == 13:
-            year, month = year + 1, 1
-    return tuple(values)
+def _materialize_ref(
+    artifact: dict[str, Any],
+    destination: Path,
+    root: Path,
+    materialize: ArtifactMaterializer,
+) -> dict[str, Any]:
+    required = {"uri", "sha256", "bytes"}
+    if missing := required - artifact.keys():
+        raise MarketHubContractError(f"materialized artifact ref lacks fields: {sorted(missing)}")
+    path = materialize(str(artifact["uri"]), destination)
+    payload = path.read_bytes()
+    if sha256_bytes(payload) != artifact["sha256"]:
+        raise MarketHubContractError(f"materialized artifact hash mismatch: {artifact['uri']}")
+    if len(payload) != int(artifact["bytes"]):
+        raise MarketHubContractError(f"materialized artifact byte mismatch: {artifact['uri']}")
+    return {
+        "path": path.resolve().relative_to(root.resolve()).as_posix(),
+        "sha256": artifact["sha256"],
+        "content_bytes": artifact["bytes"],
+    }
 
 
 def _identity_without_time(value: dict[str, Any]) -> bytes:

@@ -2353,7 +2353,7 @@ wheels = [
 
 [[package]]
 name = "quant-runtime"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
@@ -2363,6 +2363,7 @@ dependencies = [
     { name = "psutil" },
     { name = "pyarrow" },
     { name = "pyqlib" },
+    { name = "strategy-workspace" },
 ]
 
 [package.optional-dependencies]
@@ -2384,6 +2385,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = "==8.4.1" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = "==6.2.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.12.9" },
+    { name = "strategy-workspace", editable = "../strategy-workspace" },
 ]
 provides-extras = ["dev"]
 
@@ -2716,6 +2718,23 @@ sdist = { url = "https://files.pythonhosted.org/packages/b5/b4/205b0d5241d934e8a
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/cb/6a6a47d5b464bd08695d254f3da6e7986cc70c9fa5d778eda57538edfe56/starlette-1.6.0-py3-none-any.whl", hash = "sha256:a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c", size = 75969, upload-time = "2026-08-08T18:27:56.196Z" },
 ]
+
+[[package]]
+name = "strategy-workspace"
+version = "0.1.0"
+source = { editable = "../strategy-workspace" }
+dependencies = [
+    { name = "jsonschema" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "build", marker = "extra == 'dev'", specifier = ">=1.2" },
+    { name = "jsonschema", specifier = ">=4.23" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "termcolor"

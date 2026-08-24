@@ -13,18 +13,19 @@ from uuid import uuid4
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from quant_runtime.contracts.canonical_hash import (
+from quant_runtime.adapters.data.markethub.catalog import CanonicalInstrument
+from quant_runtime.adapters.data.markethub.client import MarketHubContractError
+from quant_runtime.adapters.data.markethub.model import CanonicalBar, CanonicalDataset
+from quant_runtime.artifacts import (
     canonical_json,
     read_json,
     sha256_bytes,
     sha256_value,
     write_json,
 )
-from quant_runtime.market_data.markethub.catalog import CanonicalInstrument
-from quant_runtime.market_data.markethub.client import MarketHubContractError
-from quant_runtime.market_data.markethub.daily_data import CanonicalBar, CanonicalDataset
-from quant_runtime.workspace.atomic import AtomicDirectory
-from quant_runtime.workspace.layout import RuntimeLayout
+from quant_runtime.atomic import AtomicDirectory
+
+from .storage import AdapterStorage
 
 CACHE_TRANSFORM_VERSION = "markethub-canonical-daily-cache-v1"
 
@@ -40,7 +41,7 @@ class CacheUse:
 class MarketHubCache:
     """A verified, non-authoritative conversion cache for formal consumers."""
 
-    def __init__(self, layout: RuntimeLayout) -> None:
+    def __init__(self, layout: AdapterStorage) -> None:
         self._layout = layout
 
     @contextmanager

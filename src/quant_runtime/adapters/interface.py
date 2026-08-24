@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from quant_runtime.adapters.data.markethub import ResolvedSnapshot
-from quant_runtime.sdk.package_manifest import StrategyPackage
+from quant_runtime.package import StrategyPackage
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +43,7 @@ class FormalRunInput:
 
 @dataclass(frozen=True, slots=True)
 class FormalAdapterResult:
+    formal_id: str
     backend_id: str
     adapter_version: str
     engine_version: str
@@ -55,6 +56,7 @@ class FormalAdapterResult:
 
     def as_contract(self) -> dict[str, Any]:
         return {
+            "formal_id": self.formal_id,
             "backend_id": self.backend_id,
             "adapter_version": self.adapter_version,
             "engine_version": self.engine_version,
@@ -76,4 +78,4 @@ class DiscoveryAdapter(Protocol):
 class FormalAdapter(Protocol):
     name: str
 
-    def run(self, value: FormalRunInput) -> FormalAdapterResult: ...
+    def run(self, value: FormalRunInput, *, formal_id: str) -> FormalAdapterResult: ...

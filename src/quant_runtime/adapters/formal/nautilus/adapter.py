@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-from datetime import date
 from decimal import Decimal
 
 import nautilus_trader
 
 from quant_runtime.adapters.data.markethub.cache import MarketHubCache
+from quant_runtime.adapters.formal.nautilus.china_market_rules import FeeSpec
+from quant_runtime.adapters.formal.nautilus.runner import (
+    BASE_ARTIFACTS,
+    FormalConfig,
+    StrategyContext,
+    run_engine,
+)
 from quant_runtime.adapters.interface import FormalAdapterResult, FormalRunInput
-from quant_runtime.contracts.canonical_hash import artifact_records, canonical_json
-from quant_runtime.contracts.strategy_spec import StrategySpec
-from quant_runtime.formal.nautilus.china_market_rules import FeeSpec
-from quant_runtime.formal.nautilus.runner import BASE_ARTIFACTS, FormalConfig, run_engine
-from quant_runtime.sdk.entrypoint import load_package_entrypoint
+from quant_runtime.artifacts import artifact_records
+from quant_runtime.entrypoint import load_package_entrypoint
 
 ADAPTER_VERSION = "1.0.0"
 
@@ -21,7 +24,7 @@ class NautilusWorkspaceAdapter:
     adapter_version = ADAPTER_VERSION
     engine_version = nautilus_trader.__version__
 
-    def run(self, value: FormalRunInput) -> FormalAdapterResult:
+    def run(self, value: FormalRunInput, *, formal_id: str) -> FormalAdapterResult:
         if value.snapshot.dataset is None:
             raise ValueError("Nautilus formal execution requires a verified snapshot read")
         dataset = value.snapshot.dataset
@@ -50,6 +53,7 @@ class NautilusWorkspaceAdapter:
             artifact_records(value.output, [value.output / name for name in BASE_ARTIFACTS])
         )
         return FormalAdapterResult(
+            formal_id=formal_id,
             backend_id=self.name,
             adapter_version=self.adapter_version,
             engine_version=self.engine_version,
@@ -80,22 +84,14 @@ def _formal_config(value: FormalRunInput) -> FormalConfig:
     fee = execution.get("fees", {})
     if not isinstance(fee, dict):
         raise ValueError("formal config fees must be an object")
-    source = canonical_json(value.config)
-    query = value.snapshot.manifest["query"]
     config = FormalConfig(
-        path=(value.package.root / "strategy.toml").resolve(),
-        source_bytes=source,
-        strategy=StrategySpec.from_parameters(
-            value.package.strategy_id,
-            value.package.revision,
-            value.parameters,
+        strategy=StrategyContext(
+            strategy_id=value.package.strategy_id,
+            revision=value.package.revision,
+            package_hash=value.package.package_hash,
+            parameters_hash=value.package.parameters_hash(value.parameters),
+            parameters=value.parameters,
         ),
-        base_url=str(value.snapshot.manifest["source"]["base_url"]),
-        timeout_seconds=float(execution.get("timeout_seconds", 60.0)),
-        page_size=int(execution.get("page_size", 50_000)),
-        instruments=tuple(str(item) for item in query["instruments"]),
-        start_date=date.fromisoformat(str(query["start"])),
-        end_date=date.fromisoformat(str(query["end"])),
         initial_cash_cny=Decimal(str(execution.get("initial_cash_cny", "1000000.00"))),
         lot_size=int(execution.get("lot_size", 100)),
         tick_size=Decimal(str(execution.get("tick_size", "0.01"))),
@@ -109,5 +105,4 @@ def _formal_config(value: FormalRunInput) -> FormalConfig:
             rounding_scope=str(fee.get("rounding_scope", "per_fill")),
         ),
     )
-    config.validate()
     return config

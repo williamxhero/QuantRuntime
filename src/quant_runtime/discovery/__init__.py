@@ -1,1 +1,0 @@
-"""Candidate-discovery framework adapters."""
