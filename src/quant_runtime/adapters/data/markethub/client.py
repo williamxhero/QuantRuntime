@@ -2,17 +2,27 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from time import perf_counter
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo
 
 import httpx
 
 from .calendar import canonical_trading_days
 from .catalog import CanonicalInstrument
+from .futures_model import (
+    CanonicalFuturesBar,
+    CanonicalFuturesDataset,
+    CanonicalFuturesInstrument,
+    product_code_from_instrument,
+)
 from .lineage import HealthVector
 from .model import CanonicalBar, CanonicalDataset
+
+SHANGHAI = ZoneInfo("Asia/Shanghai")
+FUTURES_PAGE_SIZE = 500_000
 
 
 class MarketHubContractError(RuntimeError):
@@ -104,10 +114,20 @@ class MarketHubClient:
         self._health = self._read_health()
         return self._health
 
-    def verify_version(self) -> None:
+    def verify_version(self, frequency: str = "1d") -> None:
         frozen = self._require_open()
         current = self._read_health()
-        if current != frozen:
+        if frequency == "1m":
+            stable = (
+                current.data_version == frozen.data_version
+                and current.futures_1m_dataset_version == frozen.futures_1m_dataset_version
+            )
+        else:
+            stable = (
+                current.data_version == frozen.data_version
+                and current.daily_dataset_version == frozen.daily_dataset_version
+            )
+        if not stable:
             raise MarketHubContractError(f"MarketHub version drift: {frozen!r} -> {current!r}")
 
     def fetch_dataset(
@@ -165,6 +185,157 @@ class MarketHubClient:
         except ValueError as exc:
             raise MarketHubContractError(f"canonical dataset validation failed: {exc}") from exc
         return dataset
+
+    def fetch_futures_dataset(
+        self,
+        instruments: tuple[str, ...],
+        start_date: date,
+        end_date: date,
+        *,
+        series_type: str,
+    ) -> CanonicalFuturesDataset:
+        if series_type not in {"back_adjusted_continuous", "main_continuous"}:
+            raise MarketHubContractError(f"unsupported futures series_type {series_type!r}")
+        frozen = self._health or self.open()
+        if not frozen.futures_1m_dataset_version:
+            raise MarketHubContractError("health response lacks future_bar_1m dataset version")
+        product_by_instrument = {
+            instrument: product_code_from_instrument(instrument) for instrument in instruments
+        }
+        casefolded = [item.casefold() for item in product_by_instrument.values()]
+        if len(casefolded) != len(set(casefolded)):
+            raise MarketHubContractError("futures instruments map to duplicate product codes")
+        coverage = self.fetch_futures_coverage(series_type=series_type)
+        coverage_by_product = {
+            str(item.get("product_code", "")).casefold(): item for item in coverage
+        }
+        missing = sorted(
+            product
+            for product in product_by_instrument.values()
+            if product.casefold() not in coverage_by_product
+        )
+        if missing:
+            raise MarketHubContractError(f"futures coverage lacks products: {missing}")
+
+        rows_by_product: dict[str, tuple[dict[str, Any], ...]] = {}
+        for instrument, product in product_by_instrument.items():
+            coverage_item = coverage_by_product[product.casefold()]
+            if str(coverage_item.get("series_type", "")) != series_type:
+                raise MarketHubContractError(f"futures coverage series drifted for {instrument!r}")
+            rows = self.fetch_futures_1m(
+                product_code=product,
+                series_type=series_type,
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if not rows:
+                raise MarketHubContractError(f"futures 1m has no rows for {instrument!r}")
+            rows_by_product[instrument] = rows
+
+        native_instruments = tuple(
+            sorted(
+                (
+                    CanonicalFuturesInstrument(
+                        instrument=instrument,
+                        product_code=product,
+                        exchange=str(rows_by_product[instrument][0].get("exchange", "")),
+                        series_type=series_type,
+                    )
+                    for instrument, product in product_by_instrument.items()
+                ),
+                key=lambda item: item.instrument,
+            )
+        )
+        by_product = {item.product_code.casefold(): item for item in native_instruments}
+        try:
+            bars = tuple(
+                sorted(
+                    (
+                        CanonicalFuturesBar.from_markethub(
+                            row,
+                            by_product,
+                            parse_time=_parse_futures_time,
+                        )
+                        for rows in rows_by_product.values()
+                        for row in rows
+                    ),
+                    key=lambda item: item.identity,
+                )
+            )
+        except ValueError as exc:
+            raise MarketHubContractError(f"invalid canonical futures data: {exc}") from exc
+        self.verify_version("1m")
+        dataset = CanonicalFuturesDataset(
+            data_version=frozen.data_version,
+            dataset_version=frozen.futures_1m_dataset_version,
+            timezone="Asia/Shanghai",
+            series_type=series_type,
+            instruments=native_instruments,
+            bars=bars,
+        )
+        try:
+            dataset.validate()
+        except ValueError as exc:
+            raise MarketHubContractError(
+                f"canonical futures dataset validation failed: {exc}"
+            ) from exc
+        return dataset
+
+    def fetch_futures_coverage(self, *, series_type: str) -> tuple[dict[str, Any], ...]:
+        rows = self._request(
+            "GET",
+            "/api/futures/coverage",
+            query={"series_type": series_type},
+        )
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise MarketHubContractError("futures coverage response must be a list of objects")
+        identities = [str(row.get("product_code", "")).casefold() for row in rows]
+        if not all(identities) or len(identities) != len(set(identities)):
+            raise MarketHubContractError("futures coverage contains missing or duplicate products")
+        return tuple(rows)
+
+    def fetch_futures_1m(
+        self,
+        *,
+        product_code: str,
+        series_type: str,
+        start_date: date,
+        end_date: date,
+    ) -> tuple[dict[str, Any], ...]:
+        cursor_time = datetime.combine(start_date, datetime.min.time(), tzinfo=SHANGHAI)
+        end_time = datetime.combine(end_date, datetime.max.time(), tzinfo=SHANGHAI)
+        rows: list[dict[str, Any]] = []
+        previous: datetime | None = None
+        while cursor_time <= end_time:
+            page = self._request(
+                "GET",
+                "/api/futures/quotes/1m",
+                query={
+                    "codes": product_code,
+                    "series_type": series_type,
+                    "start_time": cursor_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "end_time": end_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "limit": FUTURES_PAGE_SIZE,
+                },
+            )
+            if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
+                raise MarketHubContractError("futures 1m response must be a list of objects")
+            for row in page:
+                timestamp = _parse_futures_time(row.get("bar_time"))
+                if previous is not None and timestamp <= previous:
+                    raise MarketHubContractError(
+                        f"futures 1m ordering violation at {product_code}/{timestamp.isoformat()}"
+                    )
+                if str(row.get("product_code", "")).casefold() != product_code.casefold():
+                    raise MarketHubContractError("futures 1m returned an unrequested product")
+                previous = timestamp
+                rows.append(row)
+            if len(page) < FUTURES_PAGE_SIZE:
+                break
+            if previous is None:
+                raise MarketHubContractError("futures 1m full page has no last timestamp")
+            cursor_time = previous + timedelta(minutes=1)
+        return tuple(rows)
 
     def fetch_catalog(self, *, page_size: int = 5000) -> tuple[CanonicalInstrument, ...]:
         version = self._require_open().data_version
@@ -298,6 +469,7 @@ class MarketHubClient:
         health = HealthVector(
             data_version=str(response.get("data_version", "")),
             daily_dataset_version=str(versions.get("stock_daily_1d", "")),
+            futures_1m_dataset_version=str(versions.get("future_bar_1m", "")),
         )
         if not health.data_version or not health.daily_dataset_version:
             raise MarketHubContractError("health response lacks required versions")
@@ -353,3 +525,16 @@ class MarketHubClient:
         if self._health is None:
             raise MarketHubContractError("MarketHub client is not open")
         return self._health
+
+
+def _parse_futures_time(value: Any) -> datetime:
+    if value is None or not str(value).strip():
+        raise ValueError("futures bar_time is missing")
+    rendered = str(value).strip().replace("Z", "+00:00")
+    try:
+        result = datetime.fromisoformat(rendered)
+    except ValueError as exc:
+        raise ValueError(f"invalid futures bar_time {value!r}") from exc
+    if result.tzinfo is None:
+        return result.replace(tzinfo=SHANGHAI)
+    return result.astimezone(SHANGHAI)

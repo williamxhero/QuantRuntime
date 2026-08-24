@@ -57,8 +57,28 @@ class SnapshotRequest:
             raise ValueError("invalid local_cache")
         if self.start > self.end or not self.instruments:
             raise ValueError("snapshot query requires instruments and an ordered date range")
-        if self.instruments != tuple(sorted(set(self.instruments))):
-            raise ValueError("snapshot instruments must be unique and canonical-order sorted")
+        if len(self.instruments) != len(set(self.instruments)):
+            raise ValueError("snapshot instruments must be unique")
+        if self.frequency == "1d":
+            if self.instruments != tuple(sorted(self.instruments)):
+                raise ValueError("daily snapshot instruments must be canonical-order sorted")
+            if self.contract_mapping is not None:
+                raise ValueError("daily snapshots do not accept a futures contract mapping")
+        elif self.frequency == "1m":
+            if self.contract_mapping not in {
+                "back_adjusted_continuous",
+                "main_continuous",
+            }:
+                raise ValueError("futures 1m snapshot requires a supported contract_mapping")
+            if (
+                self.contract_mapping == "back_adjusted_continuous"
+                and self.adjustment != "back_adjusted"
+            ):
+                raise ValueError(
+                    "back-adjusted futures snapshots require adjustment='back_adjusted'"
+                )
+        else:
+            raise ValueError(f"unsupported MarketHub frequency {self.frequency!r}")
         if self.snapshot_mode == "materialized" and self.trust_policy == "mutable":
             raise ValueError("materialized snapshots cannot be mutable")
 

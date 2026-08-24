@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -12,6 +13,7 @@ import pyarrow.parquet as pq
 
 from quant_runtime.adapters.data.markethub.catalog import CanonicalInstrument
 from quant_runtime.adapters.data.markethub.client import MarketHubClient, MarketHubContractError
+from quant_runtime.adapters.data.markethub.futures_model import CanonicalFuturesDataset
 from quant_runtime.adapters.data.markethub.model import CanonicalBar, CanonicalDataset
 from quant_runtime.artifacts import (
     canonical_json,
@@ -22,7 +24,7 @@ from quant_runtime.artifacts import (
 )
 from quant_runtime.atomic import AtomicDirectory
 
-from .cache import MarketHubCache
+from .cache import CacheUse, MarketHubCache
 from .contract import SnapshotRequest, validate_snapshot_manifest
 from .storage import AdapterStorage
 
@@ -31,7 +33,7 @@ ADAPTER_VERSION = "1.0.0"
 
 @dataclass(frozen=True, slots=True)
 class SnapshotVerification:
-    dataset: CanonicalDataset
+    dataset: CanonicalDataset | CanonicalFuturesDataset
     catalog: tuple[dict[str, Any], ...]
     calendar: tuple[str, ...]
     coverage: tuple[dict[str, Any], ...]
@@ -52,7 +54,7 @@ class SnapshotVerification:
 class ResolvedSnapshot:
     manifest: dict[str, Any]
     manifest_path: Path
-    dataset: CanonicalDataset | None
+    dataset: CanonicalDataset | CanonicalFuturesDataset | None
 
     @property
     def snapshot_id(self) -> str:
@@ -112,6 +114,11 @@ class MarketHubDataAdapter:
             raise MarketHubContractError(
                 "materialized snapshot requires Workspace artifact materialization"
             )
+        if manifest.get("query", {}).get("frequency") == "1m":
+            raise MarketHubContractError(
+                "materialized futures snapshots require a versioned futures partition contract; "
+                "use a frozen MarketHub reference snapshot"
+            )
         local_metadata = {
             name: _materialize_ref(
                 manifest[name],
@@ -162,6 +169,10 @@ class MarketHubDataAdapter:
     ):
         if snapshot.dataset is None:
             raise ValueError("cache conversion requires a loaded snapshot dataset")
+        if isinstance(snapshot.dataset, CanonicalFuturesDataset):
+            if policy != "none":
+                raise ValueError("futures snapshots currently require market_data.local_cache=none")
+            return _no_cache(evidence_root, snapshot, consumer)
         return MarketHubCache(layout).prepare(
             policy=policy,
             snapshot_id=snapshot.snapshot_id,
@@ -178,13 +189,25 @@ class MarketHubDataAdapter:
         expected_revision: str | None = None,
     ) -> SnapshotVerification:
         client = self._client_factory(request)
-        dataset = client.fetch_dataset(
-            request.instruments,
-            request.start,
-            request.end,
-        )
+        if request.frequency == "1m":
+            dataset = client.fetch_futures_dataset(
+                request.instruments,
+                request.start,
+                request.end,
+                series_type=str(request.contract_mapping),
+            )
+        else:
+            dataset = client.fetch_dataset(
+                request.instruments,
+                request.start,
+                request.end,
+            )
         catalog = tuple(item.hash_record() for item in dataset.instruments)
-        calendar = tuple(item.isoformat() for item in dataset.trading_days)
+        calendar = (
+            tuple(item.isoformat() for item in dataset.trading_days)
+            if isinstance(dataset, CanonicalDataset)
+            else tuple(sorted({item.bar_time.date().isoformat() for item in dataset.bars}))
+        )
         bar_counts = {instrument: 0 for instrument in request.instruments}
         for bar in dataset.bars:
             bar_counts[bar.instrument] += 1
@@ -256,7 +279,16 @@ class MarketHubDataAdapter:
 
     def _resolve_revision(self, request: SnapshotRequest) -> str:
         health = self._client_factory(request).open()
-        return f"{health.data_version}:{health.daily_dataset_version}"
+        dataset_version = (
+            health.futures_1m_dataset_version
+            if request.frequency == "1m"
+            else health.daily_dataset_version
+        )
+        if not dataset_version:
+            raise MarketHubContractError(
+                f"MarketHub health lacks the {request.frequency} dataset version"
+            )
+        return f"{health.data_version}:{dataset_version}"
 
     def _publish_manifest(
         self,
@@ -442,3 +474,22 @@ def _identity_without_time(value: dict[str, Any]) -> bytes:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+@contextmanager
+def _no_cache(evidence_root: Path, snapshot: ResolvedSnapshot, consumer: str):
+    evidence_path = write_json(
+        evidence_root / "cache_conversion_manifest.json",
+        {
+            "schema": "quant-research.cache-conversion.v1",
+            "policy": "none",
+            "authoritative": False,
+            "source_snapshot_id": snapshot.snapshot_id,
+            "source_input_hash": snapshot.dataset.input_hash if snapshot.dataset else None,
+            "consumer": consumer,
+            "transform_version": None,
+            "output": None,
+            "retained": False,
+        },
+    )
+    yield CacheUse("none", None, None, evidence_path)
