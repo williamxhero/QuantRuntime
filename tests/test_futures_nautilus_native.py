@@ -25,15 +25,27 @@ PACKAGE = Path(__file__).parent / "fixtures" / "futures-native"
 
 
 class FuturesTransport:
-    def __init__(self, *, missing_offset: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        missing_offset: bool = False,
+        drift_unrelated_global_version: bool = False,
+    ) -> None:
         self.missing_offset = missing_offset
+        self.drift_unrelated_global_version = drift_unrelated_global_version
+        self.health_reads = 0
 
     def request_json(self, method, path, *, query=None, body=None):
         del body
         if method == "GET" and path == "/api/health":
+            self.health_reads += 1
             value = {
                 "status": "ok",
-                "data_version": "fixture-global-v1",
+                "data_version": (
+                    f"fixture-global-v{self.health_reads}"
+                    if self.drift_unrelated_global_version
+                    else "fixture-global-v1"
+                ),
                 "dataset_versions": {
                     "future_bar_1m": "fixture-futures-v1",
                     "stock_daily_1d": "fixture-daily-v1",
@@ -92,7 +104,7 @@ def snapshot() -> dict:
             "adapter_version": "1.0.0",
             "endpoint_contract": "v2",
             "base_url": "http://fixture",
-            "data_revision": "fixture-global-v1:fixture-futures-v1",
+            "data_revision": "future_bar_1m:fixture-futures-v1",
         },
         "query": {
             "instruments": ["agL0"],
@@ -196,6 +208,20 @@ def test_futures_capability_profile_and_native_execution(tmp_path: Path) -> None
     decisions = json.loads(base64.b64decode(payload["content"]))
     assert decisions["schema"] == "quant-runtime.nautilus-observed-decisions.v2"
     assert decisions["decisions"][0]["intent"] == "order"
+
+
+def test_futures_snapshot_ignores_unrelated_global_version_drift() -> None:
+    client = MarketHubClient(transport=FuturesTransport(drift_unrelated_global_version=True))
+
+    dataset = client.fetch_futures_dataset(
+        ("agL0",),
+        date(2025, 1, 2),
+        date(2025, 1, 2),
+        series_type="back_adjusted_continuous",
+    )
+
+    assert dataset.data_version == "future_bar_1m"
+    assert dataset.dataset_version == "fixture-futures-v1"
 
 
 def test_futures_fails_closed_on_missing_contract_specs_and_adjustment_offset(

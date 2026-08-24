@@ -279,11 +279,11 @@ class MarketHubDataAdapter:
 
     def _resolve_revision(self, request: SnapshotRequest) -> str:
         health = self._client_factory(request).open()
-        dataset_version = (
-            health.futures_1m_dataset_version
-            if request.frequency == "1m"
-            else health.daily_dataset_version
-        )
+        if request.frequency == "1m":
+            if not health.futures_1m_dataset_version:
+                raise MarketHubContractError("MarketHub health lacks the 1m dataset version")
+            return f"future_bar_1m:{health.futures_1m_dataset_version}"
+        dataset_version = health.daily_dataset_version
         if not dataset_version:
             raise MarketHubContractError(
                 f"MarketHub health lacks the {request.frequency} dataset version"

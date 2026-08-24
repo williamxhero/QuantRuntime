@@ -118,10 +118,7 @@ class MarketHubClient:
         frozen = self._require_open()
         current = self._read_health()
         if frequency == "1m":
-            stable = (
-                current.data_version == frozen.data_version
-                and current.futures_1m_dataset_version == frozen.futures_1m_dataset_version
-            )
+            stable = current.futures_1m_dataset_version == frozen.futures_1m_dataset_version
         else:
             stable = (
                 current.data_version == frozen.data_version
@@ -266,7 +263,7 @@ class MarketHubClient:
             raise MarketHubContractError(f"invalid canonical futures data: {exc}") from exc
         self.verify_version("1m")
         dataset = CanonicalFuturesDataset(
-            data_version=frozen.data_version,
+            data_version="future_bar_1m",
             dataset_version=frozen.futures_1m_dataset_version,
             timezone="Asia/Shanghai",
             series_type=series_type,
