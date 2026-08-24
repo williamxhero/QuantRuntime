@@ -8,3 +8,4 @@ class HealthVector:
     data_version: str
     daily_dataset_version: str
     futures_1m_dataset_version: str = ""
+    futures_contract_dataset_version: str = ""

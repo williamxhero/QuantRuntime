@@ -187,6 +187,17 @@ def run_futures_engine(
                 "peak_streaming_batch_bars": peak_streaming_batch_bars,
                 "rss_before_bytes": rss_before,
                 "rss_after_bytes": process.memory_info().rss,
+                "futures_execution_profile_hash": config.profile_hash,
+                "futures_contract_catalog_dataset_version": (
+                    dataset.contract_catalog.dataset_version
+                    if dataset.contract_catalog is not None
+                    else None
+                ),
+                "futures_contract_catalog_snapshot_id": (
+                    dataset.contract_catalog.snapshot_id
+                    if dataset.contract_catalog is not None
+                    else None
+                ),
             },
         )
         write_normalized_output(output, formal)

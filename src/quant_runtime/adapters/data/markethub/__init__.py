@@ -12,6 +12,7 @@ from .futures_model import (
     CanonicalFuturesBar,
     CanonicalFuturesDataset,
     CanonicalFuturesInstrument,
+    FuturesContractCatalogIdentity,
 )
 from .model import CanonicalBar, CanonicalDataset
 from .storage import AdapterStorage
@@ -29,6 +30,7 @@ __all__ = [
     "CanonicalFuturesBar",
     "CanonicalFuturesDataset",
     "CanonicalFuturesInstrument",
+    "FuturesContractCatalogIdentity",
     "MarketHubClient",
     "MarketHubContractError",
     "SnapshotRequest",

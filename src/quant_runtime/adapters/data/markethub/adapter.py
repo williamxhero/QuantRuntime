@@ -190,11 +190,15 @@ class MarketHubDataAdapter:
     ) -> SnapshotVerification:
         client = self._client_factory(request)
         if request.frequency == "1m":
+            include_contract_catalog = (
+                expected_revision is None or ";future_contract_reference:" in expected_revision
+            )
             dataset = client.fetch_futures_dataset(
                 request.instruments,
                 request.start,
                 request.end,
                 series_type=str(request.contract_mapping),
+                include_contract_catalog=include_contract_catalog,
             )
         else:
             dataset = client.fetch_dataset(
@@ -226,7 +230,11 @@ class MarketHubDataAdapter:
         )
         if any(not item["complete"] for item in coverage):
             raise MarketHubContractError(f"snapshot coverage is incomplete: {coverage!r}")
-        actual_revision = f"{dataset.data_version}:{dataset.dataset_version}"
+        actual_revision = (
+            dataset.reference_revision
+            if isinstance(dataset, CanonicalFuturesDataset)
+            else f"{dataset.data_version}:{dataset.dataset_version}"
+        )
         if expected_revision is not None and actual_revision != expected_revision:
             raise MarketHubContractError(
                 "MarketHub reference snapshot drifted before read: "
@@ -239,7 +247,11 @@ class MarketHubDataAdapter:
         if request.trust_policy == "verified_immutable":
             verification = self.read(request)
         revision = (
-            f"{verification.dataset.data_version}:{verification.dataset.dataset_version}"
+            (
+                verification.dataset.reference_revision
+                if isinstance(verification.dataset, CanonicalFuturesDataset)
+                else (f"{verification.dataset.data_version}:{verification.dataset.dataset_version}")
+            )
             if verification is not None
             else self._resolve_revision(request)
         )
@@ -287,7 +299,15 @@ class MarketHubDataAdapter:
         if request.frequency == "1m":
             if not health.futures_1m_dataset_version:
                 raise MarketHubContractError("MarketHub health lacks the 1m dataset version")
-            return f"future_bar_1m:{health.futures_1m_dataset_version}"
+            if not health.futures_contract_dataset_version:
+                raise MarketHubContractError(
+                    "MarketHub health lacks the futures contract dataset version"
+                )
+            return (
+                f"future_bar_1m:{health.futures_1m_dataset_version};"
+                "future_contract_reference:"
+                f"{health.futures_contract_dataset_version}"
+            )
         dataset_version = health.daily_dataset_version
         if not dataset_version:
             raise MarketHubContractError(

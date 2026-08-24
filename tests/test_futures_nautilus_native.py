@@ -8,9 +8,14 @@ from decimal import Decimal
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
 from strategy_workspace import WorkspaceClient, WorkspaceWorker
 
-from quant_runtime.adapters.data.markethub import MarketHubClient, MarketHubDataAdapter
+from quant_runtime.adapters.data.markethub import (
+    MarketHubClient,
+    MarketHubContractError,
+    MarketHubDataAdapter,
+)
 from quant_runtime.adapters.data.markethub.futures_model import (
     CanonicalFuturesBar,
     CanonicalFuturesBars,
@@ -31,9 +36,11 @@ class FuturesTransport:
         *,
         missing_offset: bool = False,
         drift_unrelated_global_version: bool = False,
+        missing_catalog_tick: bool = False,
     ) -> None:
         self.missing_offset = missing_offset
         self.drift_unrelated_global_version = drift_unrelated_global_version
+        self.missing_catalog_tick = missing_catalog_tick
         self.health_reads = 0
 
     def request_json(self, method, path, *, query=None, body=None):
@@ -49,9 +56,27 @@ class FuturesTransport:
                 ),
                 "dataset_versions": {
                     "future_bar_1m": "fixture-futures-v1",
+                    "future_contract_reference": "fixture-contracts-v1",
                     "stock_daily_1d": "fixture-daily-v1",
                 },
             }
+        elif method == "GET" and path == "/api/futures/contracts":
+            assert query == {"codes": "ag"}
+            value = [
+                {
+                    "product_code": "ag",
+                    "exchange": "SHFE",
+                    "tick_size": None if self.missing_catalog_tick else "1",
+                    "price_precision": 0,
+                    "multiplier": "15",
+                    "currency": "CNY",
+                    "catalog_schema_version": "future_contract_catalog_v2",
+                    "catalog_dataset_version": "fixture-contracts-v1",
+                    "snapshot_id": "fixture-contract-snapshot",
+                    "snapshot_complete": True,
+                    "content_checksum": "d" * 64,
+                }
+            ]
         elif method == "GET" and path == "/api/futures/coverage":
             value = [
                 {
@@ -94,7 +119,7 @@ class FuturesTransport:
         return deepcopy(value), len(payload), 0.001
 
 
-def snapshot() -> dict:
+def snapshot(*, catalog_bound: bool = False) -> dict:
     return {
         "schema": "quant-research.market-snapshot-ref.v1",
         "snapshot_id": "sha256:" + "c" * 64,
@@ -105,7 +130,11 @@ def snapshot() -> dict:
             "adapter_version": "1.0.0",
             "endpoint_contract": "v2",
             "base_url": "http://fixture",
-            "data_revision": "future_bar_1m:fixture-futures-v1",
+            "data_revision": (
+                "future_bar_1m:fixture-futures-v1;future_contract_reference:fixture-contracts-v1"
+                if catalog_bound
+                else "future_bar_1m:fixture-futures-v1"
+            ),
         },
         "query": {
             "instruments": ["agL0"],
@@ -120,8 +149,8 @@ def snapshot() -> dict:
     }
 
 
-def formal_config() -> dict:
-    return {
+def formal_config(*, catalog_bound: bool = False) -> dict:
+    config = {
         "execution": {
             "initial_cash_cny": "5000000",
             "slippage_ticks": "1.5",
@@ -147,13 +176,50 @@ def formal_config() -> dict:
             },
         }
     }
+    if catalog_bound:
+        config["execution"].update(
+            {
+                "coverage": {
+                    "agL0": {
+                        "rows": 3,
+                        "first_bar_time": "2025-01-02 09:01:00",
+                        "last_bar_time": "2025-01-02 09:03:00",
+                    }
+                },
+                "profile": {
+                    "schema": "quant-runtime.cn-futures-execution-profile.v1",
+                    "contract_catalog": {
+                        "schema_version": "future_contract_catalog_v2",
+                        "dataset_version": "fixture-contracts-v1",
+                        "snapshot_id": "fixture-contract-snapshot",
+                        "content_checksum": "d" * 64,
+                    },
+                    "commission_margin": {
+                        "source_id": "fixture-costs-v1",
+                        "source_sha256": "e" * 64,
+                        "effective_at": "2025-01-02",
+                        "decoder": "fixture-decoder-v1",
+                    },
+                    "historical_rate_policy": "frozen_profile_not_point_in_time",
+                    "margin_maint_policy": "equal_to_source_single_margin",
+                    "lot_size_policy": "one_contract",
+                    "close_priority": "yesterday_first",
+                },
+            }
+        )
+    return config
 
 
-def request(package_ref: dict, config: dict | None = None) -> dict:
+def request(
+    package_ref: dict,
+    config: dict | None = None,
+    *,
+    catalog_bound: bool = False,
+) -> dict:
     return {
         "schema": "quant-research.workspace-run-request.v2",
         "strategy_package": package_ref,
-        "market_snapshot": snapshot(),
+        "market_snapshot": snapshot(catalog_bound=catalog_bound),
         "parameters": {},
         "execution": {
             "topology": "formal_only",
@@ -181,6 +247,7 @@ def test_futures_capability_profile_and_native_execution(tmp_path: Path) -> None
     assert {
         "data.bar.1m",
         "data.futures.adjustment_offset",
+        "data.futures.contract_catalog",
         "decision.order",
         "decision.target_contracts",
         "market.cn.futures",
@@ -204,6 +271,7 @@ def test_futures_capability_profile_and_native_execution(tmp_path: Path) -> None
     assert metrics["streaming_chunks"] == 1
     assert metrics["streamed_native_events"] == 6
     assert metrics["peak_streaming_batch_bars"] == 3
+    assert metrics["futures_execution_profile_hash"] is None
     statistics_ref = next(
         item
         for item in completed["result"]["artifacts"]
@@ -248,8 +316,55 @@ def test_futures_snapshot_ignores_unrelated_global_version_drift() -> None:
         series_type=dataset.series_type,
         instruments=dataset.instruments,
         bars=tuple(dataset.bars),
+        contract_catalog=dataset.contract_catalog,
     )
     assert dataset.input_hash == expanded.input_hash
+
+
+def test_catalog_bound_futures_execution_validates_native_specs_and_coverage(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "catalog-bound-workspace"
+    client = WorkspaceClient(workspace)
+    package = client.register_package(PACKAGE)
+    submitted = client.submit_run(
+        request(
+            package["package_ref"],
+            formal_config(catalog_bound=True),
+            catalog_bound=True,
+        )
+    )
+    completed = executor(workspace).execute(submitted["run_id"])
+
+    assert completed["status"] == "completed"
+    metrics = completed["result"]["formal"]["primary"]["metrics"]
+    assert metrics["futures_execution_profile_hash"]
+    assert metrics["futures_contract_catalog_dataset_version"] == "fixture-contracts-v1"
+    assert metrics["futures_contract_catalog_snapshot_id"] == "fixture-contract-snapshot"
+
+    mismatch = formal_config(catalog_bound=True)
+    mismatch["execution"]["contracts"]["agL0"]["multiplier"] = "16"
+    failed_workspace = tmp_path / "catalog-mismatch-workspace"
+    failed_client = WorkspaceClient(failed_workspace)
+    failed_package = failed_client.register_package(PACKAGE)
+    failed_run = failed_client.submit_run(
+        request(failed_package["package_ref"], mismatch, catalog_bound=True)
+    )
+    failed = executor(failed_workspace).execute(failed_run["run_id"])
+    assert failed["status"] == "failed"
+    assert "native contract spec mismatch" in failed["error"]["message"]
+
+
+def test_futures_contract_catalog_fails_closed_on_missing_native_spec() -> None:
+    client = MarketHubClient(transport=FuturesTransport(missing_catalog_tick=True))
+
+    with pytest.raises(MarketHubContractError, match="native specs"):
+        client.fetch_futures_dataset(
+            ("agL0",),
+            date(2025, 1, 2),
+            date(2025, 1, 2),
+            series_type="back_adjusted_continuous",
+        )
 
 
 def test_futures_fails_closed_on_missing_contract_specs_and_adjustment_offset(

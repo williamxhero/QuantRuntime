@@ -41,6 +41,7 @@ def production_registry() -> AdapterRegistry:
                     "data.bar.1d",
                     "data.bar.1m",
                     "data.futures.adjustment_offset",
+                    "data.futures.contract_catalog",
                     "decision.order",
                     "decision.target_contracts",
                     "decision.target_weight",

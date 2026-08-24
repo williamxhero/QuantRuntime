@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 from time import perf_counter
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
@@ -17,6 +17,7 @@ from .futures_model import (
     CanonicalFuturesBars,
     CanonicalFuturesDataset,
     CanonicalFuturesInstrument,
+    FuturesContractCatalogIdentity,
     product_code_from_instrument,
 )
 from .lineage import HealthVector
@@ -116,11 +117,21 @@ class MarketHubClient:
         self._health = self._read_health()
         return self._health
 
-    def verify_version(self, frequency: str = "1d") -> None:
+    def verify_version(
+        self,
+        frequency: str = "1d",
+        *,
+        include_futures_contracts: bool = False,
+    ) -> None:
         frozen = self._require_open()
         current = self._read_health()
         if frequency == "1m":
             stable = current.futures_1m_dataset_version == frozen.futures_1m_dataset_version
+            if include_futures_contracts:
+                stable = stable and (
+                    current.futures_contract_dataset_version
+                    == frozen.futures_contract_dataset_version
+                )
         else:
             stable = (
                 current.data_version == frozen.data_version
@@ -192,6 +203,7 @@ class MarketHubClient:
         end_date: date,
         *,
         series_type: str,
+        include_contract_catalog: bool = True,
     ) -> CanonicalFuturesDataset:
         if series_type not in {"back_adjusted_continuous", "main_continuous"}:
             raise MarketHubContractError(f"unsupported futures series_type {series_type!r}")
@@ -204,6 +216,12 @@ class MarketHubClient:
         casefolded = [item.casefold() for item in product_by_instrument.values()]
         if len(casefolded) != len(set(casefolded)):
             raise MarketHubContractError("futures instruments map to duplicate product codes")
+        catalog_identity: FuturesContractCatalogIdentity | None = None
+        catalog_specs: dict[str, dict[str, Any]] = {}
+        if include_contract_catalog:
+            catalog_identity, catalog_specs = self.fetch_futures_contracts(
+                tuple(product_by_instrument.values())
+            )
         coverage = self.fetch_futures_coverage(series_type=series_type)
         coverage_by_product = {
             str(item.get("product_code", "")).casefold(): item for item in coverage
@@ -232,11 +250,20 @@ class MarketHubClient:
                 page_size=FUTURES_DATASET_PAGE_SIZE,
             ):
                 if native_instrument is None:
+                    catalog_spec = catalog_specs.get(product.casefold())
+                    if (
+                        catalog_spec is not None
+                        and str(page[0].get("exchange", "")) != catalog_spec["exchange"]
+                    ):
+                        raise MarketHubContractError(
+                            f"futures bar/catalog exchange mismatch for {instrument!r}"
+                        )
                     native_instrument = CanonicalFuturesInstrument(
                         instrument=instrument,
                         product_code=product,
                         exchange=str(page[0].get("exchange", "")),
                         series_type=series_type,
+                        **_catalog_native_fields(catalog_specs.get(product.casefold())),
                     )
                 try:
                     chunks.append(
@@ -259,7 +286,10 @@ class MarketHubClient:
         bars = CanonicalFuturesBars(
             tuple(chunks_by_instrument[item.instrument] for item in native_instruments_tuple)
         )
-        self.verify_version("1m")
+        self.verify_version(
+            "1m",
+            include_futures_contracts=include_contract_catalog,
+        )
         dataset = CanonicalFuturesDataset(
             data_version="future_bar_1m",
             dataset_version=frozen.futures_1m_dataset_version,
@@ -267,6 +297,7 @@ class MarketHubClient:
             series_type=series_type,
             instruments=native_instruments_tuple,
             bars=bars,
+            contract_catalog=catalog_identity,
         )
         try:
             dataset.validate()
@@ -275,6 +306,109 @@ class MarketHubClient:
                 f"canonical futures dataset validation failed: {exc}"
             ) from exc
         return dataset
+
+    def fetch_futures_contracts(
+        self,
+        product_codes: tuple[str, ...],
+    ) -> tuple[FuturesContractCatalogIdentity, dict[str, dict[str, Any]]]:
+        frozen = self._require_open()
+        if not frozen.futures_contract_dataset_version:
+            raise MarketHubContractError(
+                "health response lacks future_contract_reference dataset version"
+            )
+        rows = self._request(
+            "GET",
+            "/api/futures/contracts",
+            query={"codes": ",".join(product_codes)},
+        )
+        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+            raise MarketHubContractError("futures contracts response must be a list of objects")
+        if not rows:
+            raise MarketHubContractError("futures contracts response is empty")
+        identity_fields = {
+            (
+                str(row.get("catalog_schema_version", "")),
+                str(row.get("catalog_dataset_version", "")),
+                str(row.get("snapshot_id", "")),
+                str(row.get("content_checksum", "")),
+            )
+            for row in rows
+        }
+        if len(identity_fields) != 1 or not all(next(iter(identity_fields))):
+            raise MarketHubContractError("futures contract catalog identity is missing or mixed")
+        schema_version, dataset_version, snapshot_id, content_checksum = next(iter(identity_fields))
+        if dataset_version != frozen.futures_contract_dataset_version:
+            raise MarketHubContractError("futures contract catalog dataset version mismatch")
+        if any(row.get("snapshot_complete") is not True for row in rows):
+            raise MarketHubContractError("futures contract catalog snapshot is incomplete")
+        requested = {item.casefold() for item in product_codes}
+        by_product: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            product = str(row.get("product_code", "")).casefold()
+            if product not in requested:
+                raise MarketHubContractError(
+                    "futures contract catalog returned an unrequested product"
+                )
+            by_product.setdefault(product, []).append(row)
+        if set(by_product) != requested:
+            raise MarketHubContractError(
+                f"futures contract catalog lacks products: {sorted(requested - set(by_product))}"
+            )
+        specs: dict[str, dict[str, Any]] = {}
+        for product, product_rows in by_product.items():
+            try:
+                signatures = {
+                    (
+                        str(row.get("exchange", "")),
+                        str(row.get("tick_size", "")),
+                        int(row.get("price_precision", -1)),
+                        str(row.get("multiplier", "")),
+                        str(row.get("currency", "")),
+                    )
+                    for row in product_rows
+                }
+            except (TypeError, ValueError) as exc:
+                raise MarketHubContractError(
+                    f"futures contract catalog lacks native specs for product {product!r}"
+                ) from exc
+            if len(signatures) != 1:
+                raise MarketHubContractError(
+                    f"futures contract catalog native specs differ within product {product!r}"
+                )
+            exchange, tick_size, price_precision, multiplier, currency = next(iter(signatures))
+            if (
+                not exchange
+                or not tick_size
+                or price_precision < 0
+                or not multiplier
+                or currency != "CNY"
+            ):
+                raise MarketHubContractError(
+                    f"futures contract catalog lacks native specs for product {product!r}"
+                )
+            try:
+                if Decimal(tick_size) <= 0 or Decimal(multiplier) <= 0:
+                    raise ValueError
+            except (DecimalException, ValueError) as exc:
+                raise MarketHubContractError(
+                    f"futures contract catalog has invalid native specs for product {product!r}"
+                ) from exc
+            specs[product] = {
+                "currency": currency,
+                "exchange": exchange,
+                "multiplier": Decimal(multiplier),
+                "price_precision": price_precision,
+                "tick_size": Decimal(tick_size),
+            }
+        return (
+            FuturesContractCatalogIdentity(
+                schema_version=schema_version,
+                dataset_version=dataset_version,
+                snapshot_id=snapshot_id,
+                content_checksum=content_checksum,
+            ),
+            specs,
+        )
 
     def fetch_futures_coverage(self, *, series_type: str) -> tuple[dict[str, Any], ...]:
         rows = self._request(
@@ -484,6 +618,7 @@ class MarketHubClient:
             data_version=str(response.get("data_version", "")),
             daily_dataset_version=str(versions.get("stock_daily_1d", "")),
             futures_1m_dataset_version=str(versions.get("future_bar_1m", "")),
+            futures_contract_dataset_version=str(versions.get("future_contract_reference", "")),
         )
         if not health.data_version or not health.daily_dataset_version:
             raise MarketHubContractError("health response lacks required versions")
@@ -552,3 +687,14 @@ def _parse_futures_time(value: Any) -> datetime:
     if result.tzinfo is None:
         return result.replace(tzinfo=SHANGHAI)
     return result.astimezone(SHANGHAI)
+
+
+def _catalog_native_fields(value: dict[str, Any] | None) -> dict[str, Any]:
+    if value is None:
+        return {}
+    return {
+        "currency": value["currency"],
+        "multiplier": value["multiplier"],
+        "price_precision": value["price_precision"],
+        "tick_size": value["tick_size"],
+    }

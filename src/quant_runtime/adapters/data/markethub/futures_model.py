@@ -20,13 +20,43 @@ class CanonicalFuturesInstrument:
     product_code: str
     exchange: str
     series_type: str
+    price_precision: int | None = None
+    tick_size: Decimal | None = None
+    multiplier: Decimal | None = None
+    currency: str | None = None
 
     def hash_record(self) -> dict[str, Any]:
-        return {
+        record = {
             "exchange": self.exchange,
             "instrument": self.instrument,
             "product_code": self.product_code,
             "series_type": self.series_type,
+        }
+        if self.tick_size is not None:
+            record.update(
+                {
+                    "currency": self.currency,
+                    "multiplier": normalize_decimal(self.multiplier),
+                    "price_precision": self.price_precision,
+                    "tick_size": normalize_decimal(self.tick_size),
+                }
+            )
+        return record
+
+
+@dataclass(frozen=True, slots=True)
+class FuturesContractCatalogIdentity:
+    schema_version: str
+    dataset_version: str
+    snapshot_id: str
+    content_checksum: str
+
+    def hash_record(self) -> dict[str, str]:
+        return {
+            "content_checksum": self.content_checksum,
+            "dataset_version": self.dataset_version,
+            "schema_version": self.schema_version,
+            "snapshot_id": self.snapshot_id,
         }
 
 
@@ -308,6 +338,7 @@ class CanonicalFuturesDataset:
     series_type: str
     instruments: tuple[CanonicalFuturesInstrument, ...]
     bars: tuple[CanonicalFuturesBar, ...] | CanonicalFuturesBars
+    contract_catalog: FuturesContractCatalogIdentity | None = None
     _validated: bool = field(default=False, init=False, repr=False, compare=False)
     _input_hash: str | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -349,6 +380,8 @@ class CanonicalFuturesDataset:
             "series_type": self.series_type,
             "timezone": self.timezone,
         }
+        if self.contract_catalog is not None:
+            metadata["contract_catalog"] = self.contract_catalog.hash_record()
         digest = sha256()
         digest.update(b'{"bars":[')
         for index, item in enumerate(self.bars):
@@ -360,6 +393,13 @@ class CanonicalFuturesDataset:
         result = digest.hexdigest()
         object.__setattr__(self, "_input_hash", result)
         return result
+
+    @property
+    def reference_revision(self) -> str:
+        revision = f"{self.data_version}:{self.dataset_version}"
+        if self.contract_catalog is not None:
+            revision += f";future_contract_reference:{self.contract_catalog.dataset_version}"
+        return revision
 
     @property
     def bar_counts(self) -> dict[str, int]:

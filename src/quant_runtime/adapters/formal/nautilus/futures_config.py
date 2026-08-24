@@ -2,16 +2,19 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date, time
+from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from nautilus_trader.core.datetime import dt_to_unix_nanos
 
 from quant_runtime.adapters.data.markethub.futures_model import (
     CanonicalFuturesBar,
     CanonicalFuturesDataset,
+    FuturesContractCatalogIdentity,
 )
+from quant_runtime.artifacts import sha256_value
 
 from .runner import StrategyContext
 
@@ -118,11 +121,135 @@ class FuturesContractSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class FuturesCoverageSpec:
+    rows: int
+    first_bar_time: datetime
+    last_bar_time: datetime
+
+    @classmethod
+    def from_dict(cls, instrument: str, value: dict[str, Any]) -> FuturesCoverageSpec:
+        if set(value) != {"rows", "first_bar_time", "last_bar_time"}:
+            raise ValueError(
+                f"futures coverage {instrument!r} requires rows/first_bar_time/last_bar_time"
+            )
+        result = cls(
+            rows=int(value["rows"]),
+            first_bar_time=_futures_datetime(value["first_bar_time"]),
+            last_bar_time=_futures_datetime(value["last_bar_time"]),
+        )
+        if result.rows <= 0 or result.first_bar_time > result.last_bar_time:
+            raise ValueError(f"futures coverage {instrument!r} is invalid")
+        return result
+
+
+@dataclass(frozen=True, slots=True)
+class FuturesExecutionProfile:
+    contract_catalog: FuturesContractCatalogIdentity
+    commission_margin_source_id: str
+    commission_margin_source_sha256: str
+    commission_margin_effective_at: str
+    commission_margin_decoder: str
+    historical_rate_policy: str
+    margin_maint_policy: str
+    lot_size_policy: str
+    close_priority: str
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> FuturesExecutionProfile:
+        required = {
+            "schema",
+            "contract_catalog",
+            "commission_margin",
+            "historical_rate_policy",
+            "margin_maint_policy",
+            "lot_size_policy",
+            "close_priority",
+        }
+        if set(value) != required:
+            raise ValueError(
+                "futures execution profile requires exactly the frozen v1 evidence fields"
+            )
+        if value["schema"] != "quant-runtime.cn-futures-execution-profile.v1":
+            raise ValueError("unsupported futures execution profile schema")
+        catalog = value["contract_catalog"]
+        source = value["commission_margin"]
+        if not isinstance(catalog, dict) or set(catalog) != {
+            "schema_version",
+            "dataset_version",
+            "snapshot_id",
+            "content_checksum",
+        }:
+            raise ValueError("futures execution profile contract_catalog is invalid")
+        if not isinstance(source, dict) or set(source) != {
+            "source_id",
+            "source_sha256",
+            "effective_at",
+            "decoder",
+        }:
+            raise ValueError("futures execution profile commission_margin is invalid")
+        result = cls(
+            contract_catalog=FuturesContractCatalogIdentity(
+                schema_version=str(catalog["schema_version"]),
+                dataset_version=str(catalog["dataset_version"]),
+                snapshot_id=str(catalog["snapshot_id"]),
+                content_checksum=str(catalog["content_checksum"]),
+            ),
+            commission_margin_source_id=str(source["source_id"]),
+            commission_margin_source_sha256=str(source["source_sha256"]),
+            commission_margin_effective_at=str(source["effective_at"]),
+            commission_margin_decoder=str(source["decoder"]),
+            historical_rate_policy=str(value["historical_rate_policy"]),
+            margin_maint_policy=str(value["margin_maint_policy"]),
+            lot_size_policy=str(value["lot_size_policy"]),
+            close_priority=str(value["close_priority"]),
+        )
+        if not all(
+            (
+                result.contract_catalog.schema_version,
+                result.contract_catalog.dataset_version,
+                result.contract_catalog.snapshot_id,
+                result.contract_catalog.content_checksum,
+                result.commission_margin_source_id,
+                result.commission_margin_effective_at,
+                result.commission_margin_decoder,
+                result.historical_rate_policy,
+                result.margin_maint_policy,
+                result.lot_size_policy,
+                result.close_priority,
+            )
+        ):
+            raise ValueError("futures execution profile contains empty evidence fields")
+        if len(result.commission_margin_source_sha256) != 64 or any(
+            char not in "0123456789abcdef" for char in result.commission_margin_source_sha256
+        ):
+            raise ValueError("futures execution profile source_sha256 must be lowercase sha256")
+        return result
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "schema": "quant-runtime.cn-futures-execution-profile.v1",
+            "contract_catalog": self.contract_catalog.hash_record(),
+            "commission_margin": {
+                "source_id": self.commission_margin_source_id,
+                "source_sha256": self.commission_margin_source_sha256,
+                "effective_at": self.commission_margin_effective_at,
+                "decoder": self.commission_margin_decoder,
+            },
+            "historical_rate_policy": self.historical_rate_policy,
+            "margin_maint_policy": self.margin_maint_policy,
+            "lot_size_policy": self.lot_size_policy,
+            "close_priority": self.close_priority,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class FuturesExecutionConfig:
     initial_cash_cny: Decimal
     slippage_ticks: Decimal
     contracts: dict[str, FuturesContractSpec]
     trading_days: tuple[date, ...]
+    coverage: dict[str, FuturesCoverageSpec] | None = None
+    profile: FuturesExecutionProfile | None = None
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> FuturesExecutionConfig:
@@ -144,9 +271,17 @@ class FuturesExecutionConfig:
                 if isinstance(spec, dict)
             },
             trading_days=tuple(date.fromisoformat(str(item)) for item in raw_trading_days),
+            coverage=_coverage_schedule(value.get("coverage")),
+            profile=(
+                FuturesExecutionProfile.from_dict(value["profile"])
+                if isinstance(value.get("profile"), dict)
+                else None
+            ),
         )
         if len(config.contracts) != len(raw_contracts):
             raise ValueError("each futures contract spec must be an object")
+        if value.get("profile") is not None and config.profile is None:
+            raise ValueError("futures execution profile must be an object")
         config.validate()
         return config
 
@@ -170,8 +305,43 @@ class FuturesExecutionConfig:
                 raise ValueError(f"futures product_code mismatch for {instrument.instrument!r}")
             if spec.exchange != instrument.exchange:
                 raise ValueError(f"futures exchange mismatch for {instrument.instrument!r}")
+            if instrument.tick_size is not None and (
+                spec.tick_size != instrument.tick_size
+                or spec.multiplier != instrument.multiplier
+                or spec.price_precision != instrument.price_precision
+                or spec.currency != instrument.currency
+            ):
+                raise ValueError(
+                    f"frozen native contract spec mismatch for {instrument.instrument!r}"
+                )
+        if dataset.contract_catalog is not None:
+            if self.profile is None or self.coverage is None:
+                raise ValueError(
+                    "catalog-bound futures snapshots require frozen profile and coverage"
+                )
+            if self.profile.contract_catalog != dataset.contract_catalog:
+                raise ValueError("frozen execution profile contract catalog identity mismatch")
+        if self.coverage is not None:
+            if set(self.coverage) != expected:
+                raise ValueError("frozen futures coverage must exactly match snapshot instruments")
+            counts = dataset.bar_counts
+            bounds = dataset.instrument_bounds
+            for instrument, frozen in self.coverage.items():
+                if counts[instrument] != frozen.rows or bounds[instrument] != (
+                    frozen.first_bar_time,
+                    frozen.last_bar_time,
+                ):
+                    raise ValueError(
+                        f"frozen futures coverage mismatch for {instrument!r}: "
+                        f"expected {frozen!r}, got rows={counts[instrument]!r}, "
+                        f"bounds={bounds[instrument]!r}"
+                    )
         for bar in dataset.bars:
             _canonical_trading_day(bar, self.trading_days)
+
+    @property
+    def profile_hash(self) -> str | None:
+        return sha256_value(self.profile.as_dict()) if self.profile is not None else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,3 +442,25 @@ def _canonical_trading_day(
         raise ValueError(
             f"frozen futures trading_days do not cover night session {bar.bar_time.isoformat()}"
         ) from exc
+
+
+def _coverage_schedule(value: Any) -> dict[str, FuturesCoverageSpec] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or not value
+        or any(not isinstance(item, dict) for item in value.values())
+    ):
+        raise ValueError("futures execution coverage must be a non-empty object")
+    return {
+        str(instrument): FuturesCoverageSpec.from_dict(str(instrument), item)
+        for instrument, item in value.items()
+    }
+
+
+def _futures_datetime(value: Any) -> datetime:
+    rendered = str(value).strip().replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(rendered)
+    shanghai = ZoneInfo("Asia/Shanghai")
+    return parsed.replace(tzinfo=shanghai) if parsed.tzinfo is None else parsed.astimezone(shanghai)
