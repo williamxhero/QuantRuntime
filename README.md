@@ -1,4 +1,4 @@
-# Quant Runtime 0.2.0
+# Quant Runtime 0.2.1
 
 Quant Runtime is the Qlib/Nautilus execution plane for
 [`strategy-workspace`](../strategy-workspace). Strategy Workspace owns durable state and public
@@ -67,7 +67,14 @@ bars in memory when `local_cache=none`. Materialized snapshots consume only Work
 and verify every hash, byte count, coverage partition, canonical input hash, calendar, and catalog.
 
 See [architecture](docs/architecture.md), [contracts](docs/contracts.md),
-[validation](docs/validation.md), and the [0.2.0 audit](docs/TODO.md).
+[validation](docs/validation.md), and the [0.2.1 audit](docs/TODO.md).
+
+Each Nautilus formal leg publishes `native_statistics.json` with schema
+`quant-runtime.nautilus-reporting-input.v1`. It preserves the existing native statistics and adds
+the public engine inputs required by downstream Strategy Reporting: general statistics, finite
+timestamped portfolio returns, run metadata, account balances, extraction provenance, and explicit
+availability reasons. Runtime does not render HTML and deliberately keeps the core dependency at
+`nautilus_trader==1.231.0` without the visualization extra.
 
 ## Verification
 

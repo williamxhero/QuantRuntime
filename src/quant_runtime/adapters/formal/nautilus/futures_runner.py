@@ -32,9 +32,9 @@ from .futures_config import (
 from .native_reports import (
     FormalOutput,
     dataframe_records,
-    normalize_value,
     write_normalized_output,
 )
+from .reporting_input import extract_reporting_input
 from .runner import StrategyContext
 
 FUTURES_VENUE = Venue("XCNFUT")
@@ -134,15 +134,10 @@ def run_futures_engine(
         fills.to_csv(output / "native_fills.csv")
         positions.to_csv(output / "native_positions.csv")
         account.to_csv(output / "native_account.csv")
-        statistics = normalize_value(
-            {
-                "stats_pnls": result.stats_pnls,
-                "stats_returns": result.stats_returns,
-                "summary": result.summary,
-                "total_events": result.total_events,
-                "total_orders": result.total_orders,
-                "total_positions": result.total_positions,
-            }
+        statistics = extract_reporting_input(
+            result=result,
+            analyzer=engine.portfolio.analyzer,
+            account=engine.portfolio.account(FUTURES_VENUE),
         )
         write_json(output / "native_statistics.json", statistics)
         formal = FormalOutput(

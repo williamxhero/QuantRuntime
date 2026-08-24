@@ -25,10 +25,10 @@ from .instruments import VENUE, native_instrument
 from .native_reports import (
     FormalOutput,
     dataframe_records,
-    normalize_value,
     write_normalized_output,
 )
 from .nautilus_data import bar_types, native_bars, native_quotes
+from .reporting_input import extract_reporting_input
 
 BASE_ARTIFACTS = (
     "native_account.csv",
@@ -161,15 +161,10 @@ def run_engine(
         fills.to_csv(output / "native_fills.csv")
         positions.to_csv(output / "native_positions.csv")
         account.to_csv(output / "native_account.csv")
-        statistics = normalize_value(
-            {
-                "stats_pnls": result.stats_pnls,
-                "stats_returns": result.stats_returns,
-                "summary": result.summary,
-                "total_events": result.total_events,
-                "total_orders": result.total_orders,
-                "total_positions": result.total_positions,
-            }
+        statistics = extract_reporting_input(
+            result=result,
+            analyzer=engine.portfolio.analyzer,
+            account=engine.portfolio.account(VENUE),
         )
         write_json(output / "native_statistics.json", statistics)
         formal = FormalOutput(

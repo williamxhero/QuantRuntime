@@ -11,6 +11,7 @@ from quant_runtime.adapters.data.markethub import (
     MarketHubDataAdapter,
     ResolvedSnapshot,
 )
+from quant_runtime.adapters.formal.nautilus.reporting_input import REPORTING_INPUT_SCHEMA
 from quant_runtime.adapters.interface import DiscoveryRunInput, FormalAdapterResult, FormalRunInput
 from quant_runtime.artifacts import sha256_bytes, sha256_value, write_json
 from quant_runtime.capabilities import AdapterRegistry, ExecutionPlan, FormalExecution
@@ -18,7 +19,7 @@ from quant_runtime.comparison import compare_results
 from quant_runtime.package import StrategyPackage
 from quant_runtime.registry import production_registry
 
-WORKER_ID = "quant-runtime/0.2.0"
+WORKER_ID = "quant-runtime/0.2.1"
 
 
 class WorkspaceClientPort(Protocol):
@@ -381,7 +382,9 @@ def _artifact_spec(path: Path, root: Path) -> dict[str, Any]:
         record_schema = None
     elif relative.startswith("formal/"):
         role = "engine-native-evidence"
-        record_schema = None
+        record_schema = (
+            REPORTING_INPUT_SCHEMA if relative.endswith("/native_statistics.json") else None
+        )
     else:
         role = "runtime-evidence"
         record_schema = None

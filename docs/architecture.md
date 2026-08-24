@@ -1,6 +1,6 @@
 # Architecture
 
-Quant Runtime 0.2.0 is an execution worker, not a second control plane.
+Quant Runtime 0.2.1 is an execution worker, not a second control plane.
 
 ```text
 Strategy Workspace
@@ -60,3 +60,16 @@ candidate rows are absent from `FormalRunInput`.
 Reference reads default to no raw-bar cache; an ephemeral non-authoritative conversion is available
 when requested. A persistent conversion is rejected until the request supplies a Workspace-managed
 ArtifactRef, so attempt scratch is never mislabeled as durable state.
+
+## Reporting evidence seam
+
+Both equity and futures runners call one shared extractor before `BacktestEngine.dispose()`. The
+extractor uses only pinned Nautilus 1.231.0 public interfaces: `BacktestResult`,
+`PortfolioAnalyzer.get_performance_stats_general()`, `PortfolioAnalyzer.portfolio_returns()`, and
+the account balance methods. In this pinned release `BacktestResult` does not expose
+`stats_general`, so the tested public analyzer method is the only general-statistics source.
+
+The extractor never reads analyzer/account private attributes and never derives returns or account
+metrics from reports, positions, or balance snapshots. Strategy Reporting is a separate downstream
+read-model owner and consumes the immutable Workspace artifact; Runtime has no visualization
+dependency and does not render a tearsheet.

@@ -199,6 +199,19 @@ def test_futures_capability_profile_and_native_execution(tmp_path: Path) -> None
     assert metrics["native_fill_report_rows"] >= 1
     assert metrics["native_position_report_rows"] >= 1
     assert metrics["native_account_report_rows"] >= 1
+    statistics_ref = next(
+        item
+        for item in completed["result"]["artifacts"]
+        if item["name"].endswith("native_statistics.json")
+    )
+    assert statistics_ref["record_schema"] == "quant-runtime.nautilus-reporting-input.v1"
+    statistics_payload = client.read_artifact(statistics_ref["uri"])
+    statistics = json.loads(base64.b64decode(statistics_payload["content"]))
+    assert statistics["schema"] == "quant-runtime.nautilus-reporting-input.v1"
+    assert statistics["extraction"]["engine_version"] == "1.231.0"
+    assert {"stats_pnls", "stats_returns", "stats_general"} <= statistics.keys()
+    assert statistics["run_info"]["total_orders"] >= 1
+    assert statistics["account_info"]
     decision_ref = next(
         item
         for item in completed["result"]["artifacts"]

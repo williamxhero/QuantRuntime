@@ -38,6 +38,26 @@ def test_nautilus_preserves_native_evidence_and_observed_bar_decisions(
     assert "native_orders.csv" in names
     assert "native_statistics.json" in names
     assert "strategy_decisions.json" in names
+    assert metrics["native_order_report_rows"] == 0
+    assert metrics["native_fill_report_rows"] == 0
+    assert metrics["native_position_report_rows"] == 0
+    statistics_ref = next(
+        item for item in evidence if item["name"].endswith("native_statistics.json")
+    )
+    assert statistics_ref["record_schema"] == "quant-runtime.nautilus-reporting-input.v1"
+    statistics_payload = client.read_artifact(statistics_ref["uri"])
+    statistics = json.loads(base64.b64decode(statistics_payload["content"]))
+    assert statistics["schema"] == "quant-runtime.nautilus-reporting-input.v1"
+    assert statistics["extraction"]["engine_version"] == "1.231.0"
+    assert statistics["portfolio_returns"] == []
+    assert statistics["availability"]["portfolio_returns"]["status"] == "unavailable"
+    assert {"stats_pnls", "stats_returns", "stats_general"} <= statistics.keys()
+    normalized_ref = next(
+        item for item in evidence if item["name"].endswith("normalized_output.json")
+    )
+    normalized_payload = client.read_artifact(normalized_ref["uri"])
+    normalized = json.loads(base64.b64decode(normalized_payload["content"]))
+    assert normalized["native_statistics"] == statistics
     decision_ref = next(
         item for item in evidence if item["name"].endswith("strategy_decisions.json")
     )

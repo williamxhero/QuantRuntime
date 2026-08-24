@@ -15,6 +15,9 @@ def test_production_registry_has_only_real_adapters_and_no_apex_import() -> None
     registry = production_registry()
     assert registry.names("discovery") == ("qlib",)
     assert registry.names("formal") == ("nautilus",)
+    nautilus = registry.profile("formal", "nautilus")
+    assert nautilus.adapter_version == "1.1.0"
+    assert "evidence.nautilus_reporting_input" in nautilus.capabilities
     files = [ROOT / "pyproject.toml", *sorted((ROOT / "src").rglob("*.py"))]
     forbidden = ("apex_research", "apex-research", "apextrade", "leanadapter", "lean_adapter")
     for path in files:
@@ -32,6 +35,21 @@ def test_legacy_workspace_and_manifest_ownership_is_gone() -> None:
     assert not (source / "contracts" / "candidate_manifest.py").exists()
     assert not (source / "contracts" / "formal_manifest.py").exists()
     assert not list((ROOT / "strategies").rglob("strategy.toml"))
+
+
+def test_nautilus_reporting_input_uses_no_private_or_visualization_fallbacks() -> None:
+    source = (
+        ROOT / "src" / "quant_runtime" / "adapters" / "formal" / "nautilus" / "reporting_input.py"
+    ).read_text(encoding="utf-8")
+    assert "analyzer._" not in source
+    assert "account._" not in source
+    assert "create_tearsheet" not in source
+    assert "plotly" not in source.lower()
+    assert "kaleido" not in source.lower()
+
+    project = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert '"nautilus_trader==1.231.0"' in project
+    assert "nautilus_trader[visualization]" not in project
 
 
 def test_strategy_package_requires_an_explicit_materialized_root(tmp_path: Path) -> None:

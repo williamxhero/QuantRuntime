@@ -1,4 +1,4 @@
-# Quant Runtime 0.2.0 implementation audit
+# Quant Runtime 0.2.1 implementation audit
 
 | Requirement | Status | Evidence |
 |---|---|---|
@@ -15,6 +15,9 @@
 | Strict JSON run CLI and standalone package registration | Complete | CLI integration test |
 | Normal wheel dependency and no Apex import | Complete | metadata/content and source scans |
 | Connected MarketHub readiness | External gate | run separately; never replaced with fixtures |
+| Versioned Nautilus offline reporting input | Complete | shared extractor and public 1.231.0 contract test |
+| Equity/futures reporting-input parity | Complete | real engine artifact publication tests |
+| Strict finite and availability semantics | Complete | empty/short/nonfinite/duplicate regression tests |
 
 There is no compatibility TODO for the old pipeline: the cut is intentional and complete. Existing
-legacy runtime data is retained but unreachable from 0.2.0 code.
+legacy runtime data is retained but unreachable from 0.2.x code.
