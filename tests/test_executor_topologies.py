@@ -205,3 +205,20 @@ def test_run_identity_binds_request_snapshot_topology_and_engine_versions(
         "local_cache": "none",
         "method": "snapshot_native",
     }
+
+
+def test_persistent_cache_fails_closed_without_a_workspace_artifact_ref(
+    tmp_path: Path,
+    market_fixture: dict,
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = WorkspaceClient(workspace)
+    package = client.register_package(PACKAGE)
+    value = request(package["package_ref"], "formal_only")
+    value["execution"]["formal"][0]["config"] = {"market_data": {"local_cache": "persistent"}}
+    submitted = client.submit_run(value)
+
+    failed = executor(workspace, market_fixture).execute(submitted["run_id"])
+
+    assert failed["status"] == "failed"
+    assert "Strategy Workspace ArtifactRef" in failed["error"]["message"]

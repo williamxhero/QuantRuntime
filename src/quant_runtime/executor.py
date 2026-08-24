@@ -345,7 +345,11 @@ def _read_semantics(execution: FormalExecution) -> dict[str, Any]:
     if not isinstance(raw, Mapping):
         raise ValueError("formal config market_data must be an object")
     local_cache = str(raw.get("local_cache", "none"))
-    if local_cache not in {"none", "ephemeral", "persistent"}:
+    if local_cache == "persistent":
+        raise ValueError(
+            "persistent cache requires a Strategy Workspace ArtifactRef and is not supported"
+        )
+    if local_cache not in {"none", "ephemeral"}:
         raise ValueError("formal market_data.local_cache is invalid")
     return {
         "local_cache": local_cache,

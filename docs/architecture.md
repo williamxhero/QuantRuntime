@@ -54,3 +54,7 @@ Qlib discovery remains optional and produces only native discovery evidence. Eve
 from the same frozen snapshot and independently owns orders, fills, positions, account state, fees,
 market rules, and reports. Nautilus strategies derive decisions inside observed-bar callbacks; Qlib
 candidate rows are absent from `FormalRunInput`.
+
+Reference reads default to no raw-bar cache; an ephemeral non-authoritative conversion is available
+when requested. A persistent conversion is rejected until the request supplies a Workspace-managed
+ArtifactRef, so attempt scratch is never mislabeled as durable state.
