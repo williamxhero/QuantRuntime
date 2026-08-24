@@ -20,7 +20,10 @@ from nautilus_trader.model.identifiers import InstrumentId, Symbol, Venue
 from nautilus_trader.model.instruments import FuturesContract
 from nautilus_trader.model.objects import Money, Price, Quantity
 
-from quant_runtime.adapters.data.markethub.futures_model import CanonicalFuturesDataset
+from quant_runtime.adapters.data.markethub.futures_model import (
+    CanonicalFuturesBar,
+    CanonicalFuturesDataset,
+)
 from quant_runtime.artifacts import normalize_decimal, write_json
 
 from .decisions import FormalDecisionRecord, decision_envelope, decision_hash
@@ -38,6 +41,7 @@ from .reporting_input import extract_reporting_input
 from .runner import StrategyContext
 
 FUTURES_VENUE = Venue("XCNFUT")
+FUTURES_STREAM_BATCH_BARS = 50_000
 
 
 def run_futures_engine(
@@ -58,7 +62,8 @@ def run_futures_engine(
         item.instrument: _native_instrument(
             item.instrument,
             config.contracts[item.instrument],
-            dataset,
+            dataset.instrument_bounds[item.instrument],
+            dataset.series_type,
             config.slippage_ticks,
         )
         for item in dataset.instruments
@@ -72,6 +77,7 @@ def run_futures_engine(
         instruments=instruments,
         contract_specs=config.contracts,
         execution=config,
+        streaming=True,
     )
     engine = BacktestEngine(
         config=BacktestEngineConfig(
@@ -96,13 +102,6 @@ def run_futures_engine(
         )
         for instrument in instruments.values():
             engine.add_instrument(instrument)
-        inject_started = perf_counter()
-        for quotes in _native_quotes(dataset, instruments, config).values():
-            engine.add_data(quotes, sort=False)
-        for bars in _native_bars(dataset, instruments).values():
-            engine.add_data(bars, sort=False)
-        engine.sort_data()
-        injection_seconds = perf_counter() - inject_started
         package_strategy = strategy_class(
             context=context,
             bar_types=types,
@@ -110,9 +109,27 @@ def run_futures_engine(
             native_by_canonical=native_by_canonical,
         )
         engine.add_strategy(package_strategy)
+        injection_seconds = 0.0
+        run_seconds = 0.0
+        streaming_chunks = 0
+        streamed_native_events = 0
+        peak_streaming_batch_bars = 0
+        for signal_batch in _signal_batches(dataset.bars):
+            context.load_signal_batch(signal_batch)
+            inject_started = perf_counter()
+            native_batch = _native_events(signal_batch, instruments, config)
+            engine.add_data(native_batch, validate=False, sort=True)
+            injection_seconds += perf_counter() - inject_started
+            run_started = perf_counter()
+            engine.run(streaming=True)
+            run_seconds += perf_counter() - run_started
+            engine.clear_data()
+            streaming_chunks += 1
+            streamed_native_events += len(native_batch)
+            peak_streaming_batch_bars = max(peak_streaming_batch_bars, len(signal_batch))
         run_started = perf_counter()
-        engine.run()
-        run_seconds = perf_counter() - run_started
+        engine.end()
+        run_seconds += perf_counter() - run_started
         observed = tuple(getattr(package_strategy, "runtime_decisions", ()))
         if any(not isinstance(item, FormalDecisionRecord) for item in observed):
             raise ValueError("futures runtime_decisions must contain FormalDecisionRecord values")
@@ -164,6 +181,10 @@ def run_futures_engine(
                 "native_position_report_rows": len(positions),
                 "futures_cost_semantics": "tagged_open_close_today_v1",
                 "futures_slippage_semantics": "native_quote_spread_ticks_v1",
+                "futures_data_loading": "nautilus_native_streaming_v1",
+                "streaming_chunks": streaming_chunks,
+                "streamed_native_events": streamed_native_events,
+                "peak_streaming_batch_bars": peak_streaming_batch_bars,
                 "rss_before_bytes": rss_before,
                 "rss_after_bytes": process.memory_info().rss,
             },
@@ -198,11 +219,11 @@ class FuturesFeeModel(FeeModel):
 def _native_instrument(
     canonical: str,
     spec: FuturesContractSpec,
-    dataset: CanonicalFuturesDataset,
+    bounds: tuple[Any, Any],
+    series_type: str,
     slippage_ticks: Decimal,
 ) -> FuturesContract:
-    first = min(item.bar_time for item in dataset.bars if item.instrument == canonical)
-    last = max(item.bar_time for item in dataset.bars if item.instrument == canonical)
+    first, last = bounds
     instrument_id = InstrumentId(Symbol(canonical), FUTURES_VENUE)
     native_precision = _native_precision(spec, slippage_ticks)
     return FuturesContract(
@@ -225,7 +246,7 @@ def _native_instrument(
         info={
             "canonical_instrument": canonical,
             "product_code": spec.product_code,
-            "series_type": dataset.series_type,
+            "series_type": series_type,
             "configured_price_precision": spec.price_precision,
         },
     )
@@ -245,19 +266,34 @@ def _bar_types(instruments: dict[str, FuturesContract]) -> tuple[BarType, ...]:
     )
 
 
-def _native_bars(
-    dataset: CanonicalFuturesDataset,
+def _native_events(
+    bars: list[CanonicalFuturesBar],
     instruments: dict[str, FuturesContract],
-) -> dict[str, list[Bar]]:
-    result: dict[str, list[Bar]] = {key: [] for key in instruments}
+    config: FuturesExecutionConfig,
+) -> list[QuoteTick | Bar]:
+    result: list[QuoteTick | Bar] = []
     types = {
         key: BarType.from_str(f"{instrument.id}-1-MINUTE-LAST-EXTERNAL")
         for key, instrument in instruments.items()
     }
-    for item in dataset.bars:
+    size = Quantity.from_int(1_000_000_000)
+    for item in bars:
         instrument = instruments[item.instrument]
+        spec = config.contracts[item.instrument]
+        slippage = spec.tick_size * config.slippage_ticks
         timestamp = dt_to_unix_nanos(item.bar_time)
-        result[item.instrument].append(
+        result.append(
+            QuoteTick(
+                instrument_id=instrument.id,
+                bid_price=instrument.make_price(item.economic_close - slippage),
+                ask_price=instrument.make_price(item.economic_close + slippage),
+                bid_size=size,
+                ask_size=size,
+                ts_event=timestamp,
+                ts_init=timestamp,
+            )
+        )
+        result.append(
             Bar(
                 bar_type=types[item.instrument],
                 open=instrument.make_price(item.economic_open),
@@ -272,30 +308,17 @@ def _native_bars(
     return result
 
 
-def _native_quotes(
-    dataset: CanonicalFuturesDataset,
-    instruments: dict[str, FuturesContract],
-    config: FuturesExecutionConfig,
-) -> dict[str, list[QuoteTick]]:
-    result: dict[str, list[QuoteTick]] = {key: [] for key in instruments}
-    size = Quantity.from_int(1_000_000_000)
-    for item in dataset.bars:
-        instrument = instruments[item.instrument]
-        spec = config.contracts[item.instrument]
-        slippage = spec.tick_size * config.slippage_ticks
-        timestamp = dt_to_unix_nanos(item.bar_time)
-        result[item.instrument].append(
-            QuoteTick(
-                instrument_id=instrument.id,
-                bid_price=instrument.make_price(item.economic_close - slippage),
-                ask_price=instrument.make_price(item.economic_close + slippage),
-                bid_size=size,
-                ask_size=size,
-                ts_event=timestamp,
-                ts_init=timestamp,
-            )
-        )
-    return result
+def _signal_batches(bars, *, batch_size: int = FUTURES_STREAM_BATCH_BARS):
+    batch: list[CanonicalFuturesBar] = []
+    previous_timestamp = None
+    for bar in bars:
+        if batch and len(batch) >= batch_size and bar.bar_time != previous_timestamp:
+            yield batch
+            batch = []
+        batch.append(bar)
+        previous_timestamp = bar.bar_time
+    if batch:
+        yield batch
 
 
 def _strategy_records(strategy: Any, name: str) -> list[dict[str, Any]]:

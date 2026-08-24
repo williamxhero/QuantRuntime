@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, time
 from decimal import Decimal
@@ -189,23 +190,17 @@ class FuturesStrategyContext:
     instruments: dict[str, Any]
     contract_specs: dict[str, FuturesContractSpec]
     execution: FuturesExecutionConfig
+    streaming: bool = False
     _signal_bars: dict[tuple[int, str], FuturesSignalBar] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self,
             "_signal_bars",
-            {
-                (dt_to_unix_nanos(item.bar_time), item.instrument): FuturesSignalBar(
-                    bar=item,
-                    trading_day=_canonical_trading_day(
-                        item,
-                        self.execution.trading_days,
-                    ),
-                )
-                for item in self.dataset.bars
-            },
+            {},
         )
+        if not self.streaming:
+            self.load_signal_batch(self.dataset.bars)
 
     @property
     def parameters(self) -> dict[str, Any]:
@@ -218,6 +213,23 @@ class FuturesStrategyContext:
             return self._signal_bars[(int(ts_event), instrument)]
         except KeyError as exc:
             raise KeyError(f"no frozen signal bar for {instrument!r} at {ts_event}") from exc
+
+    def load_signal_batch(self, bars: Iterable[CanonicalFuturesBar]) -> None:
+        """Replace the ephemeral signal sidecar used by one native streaming batch."""
+
+        self._signal_bars.clear()
+        self._signal_bars.update(
+            {
+                (dt_to_unix_nanos(item.bar_time), item.instrument): FuturesSignalBar(
+                    bar=item,
+                    trading_day=_canonical_trading_day(
+                        item,
+                        self.execution.trading_days,
+                    ),
+                )
+                for item in bars
+            }
+        )
 
 
 def _commission_schedule(

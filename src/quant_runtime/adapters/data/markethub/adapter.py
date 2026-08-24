@@ -206,11 +206,16 @@ class MarketHubDataAdapter:
         calendar = (
             tuple(item.isoformat() for item in dataset.trading_days)
             if isinstance(dataset, CanonicalDataset)
-            else tuple(sorted({item.bar_time.date().isoformat() for item in dataset.bars}))
+            else tuple(item.isoformat() for item in dataset.trading_dates)
         )
-        bar_counts = {instrument: 0 for instrument in request.instruments}
-        for bar in dataset.bars:
-            bar_counts[bar.instrument] += 1
+        bar_counts = (
+            {instrument: 0 for instrument in request.instruments}
+            if isinstance(dataset, CanonicalDataset)
+            else dataset.bar_counts
+        )
+        if isinstance(dataset, CanonicalDataset):
+            for bar in dataset.bars:
+                bar_counts[bar.instrument] += 1
         coverage = tuple(
             {
                 "instrument": instrument,

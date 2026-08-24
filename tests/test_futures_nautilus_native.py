@@ -13,6 +13,7 @@ from strategy_workspace import WorkspaceClient, WorkspaceWorker
 from quant_runtime.adapters.data.markethub import MarketHubClient, MarketHubDataAdapter
 from quant_runtime.adapters.data.markethub.futures_model import (
     CanonicalFuturesBar,
+    CanonicalFuturesBars,
     CanonicalFuturesDataset,
     CanonicalFuturesInstrument,
 )
@@ -68,7 +69,7 @@ class FuturesTransport:
                 "series_type": "back_adjusted_continuous",
                 "start_time": "2025-01-02 00:00:00",
                 "end_time": "2025-01-02 23:59:59",
-                "limit": 500000,
+                "limit": 200000,
             }
             value = []
             for minute, close in enumerate(("100", "101", "102"), start=1):
@@ -199,6 +200,10 @@ def test_futures_capability_profile_and_native_execution(tmp_path: Path) -> None
     assert metrics["native_fill_report_rows"] >= 1
     assert metrics["native_position_report_rows"] >= 1
     assert metrics["native_account_report_rows"] >= 1
+    assert metrics["futures_data_loading"] == "nautilus_native_streaming_v1"
+    assert metrics["streaming_chunks"] == 1
+    assert metrics["streamed_native_events"] == 6
+    assert metrics["peak_streaming_batch_bars"] == 3
     statistics_ref = next(
         item
         for item in completed["result"]["artifacts"]
@@ -235,6 +240,16 @@ def test_futures_snapshot_ignores_unrelated_global_version_drift() -> None:
 
     assert dataset.data_version == "future_bar_1m"
     assert dataset.dataset_version == "fixture-futures-v1"
+    assert isinstance(dataset.bars, CanonicalFuturesBars)
+    expanded = CanonicalFuturesDataset(
+        data_version=dataset.data_version,
+        dataset_version=dataset.dataset_version,
+        timezone=dataset.timezone,
+        series_type=dataset.series_type,
+        instruments=dataset.instruments,
+        bars=tuple(dataset.bars),
+    )
+    assert dataset.input_hash == expanded.input_hash
 
 
 def test_futures_fails_closed_on_missing_contract_specs_and_adjustment_offset(

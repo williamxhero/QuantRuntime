@@ -13,7 +13,8 @@ import httpx
 from .calendar import canonical_trading_days
 from .catalog import CanonicalInstrument
 from .futures_model import (
-    CanonicalFuturesBar,
+    CanonicalFuturesBarChunk,
+    CanonicalFuturesBars,
     CanonicalFuturesDataset,
     CanonicalFuturesInstrument,
     product_code_from_instrument,
@@ -23,6 +24,7 @@ from .model import CanonicalBar, CanonicalDataset
 
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 FUTURES_PAGE_SIZE = 500_000
+FUTURES_DATASET_PAGE_SIZE = 200_000
 
 
 class MarketHubContractError(RuntimeError):
@@ -214,60 +216,56 @@ class MarketHubClient:
         if missing:
             raise MarketHubContractError(f"futures coverage lacks products: {missing}")
 
-        rows_by_product: dict[str, tuple[dict[str, Any], ...]] = {}
+        chunks_by_instrument: dict[str, tuple[CanonicalFuturesBarChunk, ...]] = {}
+        native_instruments: list[CanonicalFuturesInstrument] = []
         for instrument, product in product_by_instrument.items():
             coverage_item = coverage_by_product[product.casefold()]
             if str(coverage_item.get("series_type", "")) != series_type:
                 raise MarketHubContractError(f"futures coverage series drifted for {instrument!r}")
-            rows = self.fetch_futures_1m(
+            chunks: list[CanonicalFuturesBarChunk] = []
+            native_instrument: CanonicalFuturesInstrument | None = None
+            for page in self._iter_futures_1m_pages(
                 product_code=product,
                 series_type=series_type,
                 start_date=start_date,
                 end_date=end_date,
-            )
-            if not rows:
-                raise MarketHubContractError(f"futures 1m has no rows for {instrument!r}")
-            rows_by_product[instrument] = rows
-
-        native_instruments = tuple(
-            sorted(
-                (
-                    CanonicalFuturesInstrument(
+                page_size=FUTURES_DATASET_PAGE_SIZE,
+            ):
+                if native_instrument is None:
+                    native_instrument = CanonicalFuturesInstrument(
                         instrument=instrument,
                         product_code=product,
-                        exchange=str(rows_by_product[instrument][0].get("exchange", "")),
+                        exchange=str(page[0].get("exchange", "")),
                         series_type=series_type,
                     )
-                    for instrument, product in product_by_instrument.items()
-                ),
-                key=lambda item: item.instrument,
-            )
-        )
-        by_product = {item.product_code.casefold(): item for item in native_instruments}
-        try:
-            bars = tuple(
-                sorted(
-                    (
-                        CanonicalFuturesBar.from_markethub(
-                            row,
-                            by_product,
+                try:
+                    chunks.append(
+                        CanonicalFuturesBarChunk.from_rows(
+                            page,
+                            {product.casefold(): native_instrument},
                             parse_time=_parse_futures_time,
                         )
-                        for rows in rows_by_product.values()
-                        for row in rows
-                    ),
-                    key=lambda item: item.identity,
-                )
-            )
-        except ValueError as exc:
-            raise MarketHubContractError(f"invalid canonical futures data: {exc}") from exc
+                    )
+                except ValueError as exc:
+                    raise MarketHubContractError(f"invalid canonical futures data: {exc}") from exc
+            if not chunks or native_instrument is None:
+                raise MarketHubContractError(f"futures 1m has no rows for {instrument!r}")
+            native_instruments.append(native_instrument)
+            chunks_by_instrument[instrument] = tuple(chunks)
+
+        native_instruments_tuple = tuple(
+            sorted(native_instruments, key=lambda item: item.instrument)
+        )
+        bars = CanonicalFuturesBars(
+            tuple(chunks_by_instrument[item.instrument] for item in native_instruments_tuple)
+        )
         self.verify_version("1m")
         dataset = CanonicalFuturesDataset(
             data_version="future_bar_1m",
             dataset_version=frozen.futures_1m_dataset_version,
             timezone="Asia/Shanghai",
             series_type=series_type,
-            instruments=native_instruments,
+            instruments=native_instruments_tuple,
             bars=bars,
         )
         try:
@@ -299,9 +297,28 @@ class MarketHubClient:
         start_date: date,
         end_date: date,
     ) -> tuple[dict[str, Any], ...]:
+        rows: list[dict[str, Any]] = []
+        for page in self._iter_futures_1m_pages(
+            product_code=product_code,
+            series_type=series_type,
+            start_date=start_date,
+            end_date=end_date,
+            page_size=FUTURES_PAGE_SIZE,
+        ):
+            rows.extend(page)
+        return tuple(rows)
+
+    def _iter_futures_1m_pages(
+        self,
+        *,
+        product_code: str,
+        series_type: str,
+        start_date: date,
+        end_date: date,
+        page_size: int,
+    ):
         cursor_time = datetime.combine(start_date, datetime.min.time(), tzinfo=SHANGHAI)
         end_time = datetime.combine(end_date, datetime.max.time(), tzinfo=SHANGHAI)
-        rows: list[dict[str, Any]] = []
         previous: datetime | None = None
         while cursor_time <= end_time:
             page = self._request(
@@ -312,7 +329,7 @@ class MarketHubClient:
                     "series_type": series_type,
                     "start_time": cursor_time.strftime("%Y-%m-%d %H:%M:%S"),
                     "end_time": end_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "limit": FUTURES_PAGE_SIZE,
+                    "limit": page_size,
                 },
             )
             if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
@@ -326,13 +343,13 @@ class MarketHubClient:
                 if str(row.get("product_code", "")).casefold() != product_code.casefold():
                     raise MarketHubContractError("futures 1m returned an unrequested product")
                 previous = timestamp
-                rows.append(row)
-            if len(page) < FUTURES_PAGE_SIZE:
+            if page:
+                yield tuple(page)
+            if len(page) < page_size:
                 break
             if previous is None:
                 raise MarketHubContractError("futures 1m full page has no last timestamp")
             cursor_time = previous + timedelta(minutes=1)
-        return tuple(rows)
 
     def fetch_catalog(self, *, page_size: int = 5000) -> tuple[CanonicalInstrument, ...]:
         version = self._require_open().data_version
