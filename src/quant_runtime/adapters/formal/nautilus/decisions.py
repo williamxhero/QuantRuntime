@@ -26,13 +26,66 @@ class DecisionRecord:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class FormalDecisionRecord:
+    """Engine-observed package decision with an intent-specific canonical payload."""
+
+    ts_event: int
+    instrument: str
+    intent: str
+    payload: dict[str, Any]
+
+    def validate(self) -> None:
+        if self.ts_event < 0 or not self.instrument or not self.intent:
+            raise ValueError("formal decision requires timestamp, instrument, and intent")
+        if self.intent not in {
+            "target_weight",
+            "target_position",
+            "target_contracts",
+            "target_notional",
+            "order",
+            "cancel",
+            "spread",
+        }:
+            raise ValueError(f"unsupported formal decision intent {self.intent!r}")
+        if not isinstance(self.payload, dict) or not self.payload:
+            raise ValueError("formal decision payload must be a non-empty object")
+
+    def as_dict(self) -> dict[str, Any]:
+        self.validate()
+        return {
+            "ts_event": self.ts_event,
+            "instrument": self.instrument,
+            "intent": self.intent,
+            "payload": self.payload,
+        }
+
+
 def decision_envelope(
-    decisions: list[DecisionRecord] | tuple[DecisionRecord, ...],
+    decisions: list[DecisionRecord | FormalDecisionRecord]
+    | tuple[DecisionRecord | FormalDecisionRecord, ...],
     strategy_identity_hash: str,
+    *,
+    generic: bool = False,
 ) -> dict[str, Any]:
-    ordered = sorted(decisions, key=lambda item: (item.signal_date, -item.score, item.instrument))
+    if generic:
+        if any(not isinstance(item, FormalDecisionRecord) for item in decisions):
+            raise ValueError("generic formal decisions require FormalDecisionRecord values")
+        ordered = sorted(
+            decisions,
+            key=lambda item: (item.ts_event, item.instrument, item.intent),  # type: ignore[union-attr]
+        )
+        schema = "quant-runtime.nautilus-observed-decisions.v2"
+    elif all(isinstance(item, DecisionRecord) for item in decisions):
+        ordered = sorted(
+            decisions,
+            key=lambda item: (item.signal_date, -item.score, item.instrument),  # type: ignore[union-attr]
+        )
+        schema = DECISIONS_SCHEMA
+    else:
+        raise ValueError("formal decisions cannot mix legacy and generic record types")
     return {
-        "schema": DECISIONS_SCHEMA,
+        "schema": schema,
         "strategy_identity_hash": strategy_identity_hash,
         "observed_by": "NautilusTrader",
         "decisions": [item.as_dict() for item in ordered],

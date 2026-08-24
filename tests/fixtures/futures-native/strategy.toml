@@ -1,0 +1,32 @@
+schema = "quant-research.strategy-package.v1"
+strategy_id = "test.futures-native"
+revision = 1
+display_name = "Native futures test fixture"
+parameter_schema = "parameters.schema.json"
+
+[pipeline]
+discovery = "forbidden"
+formal = "required"
+
+[requirements]
+asset_classes = ["futures"]
+frequencies = ["1m"]
+capabilities = [
+  "data.bar.1m",
+  "data.futures.adjustment_offset",
+  "decision.order",
+  "evidence.engine_native",
+  "market.cn.futures",
+  "market.cn.futures.continuous",
+  "order.market",
+  "portfolio.multi_instrument",
+  "position.long_short",
+  "run.backtest",
+]
+decision_intents = ["order"]
+
+[implementations.formal]
+nautilus = "strategy.py:NativeFuturesFixtureStrategy"
+
+[dependencies]
+markethub_contract = "v2"

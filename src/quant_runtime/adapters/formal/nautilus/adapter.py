@@ -5,7 +5,10 @@ from decimal import Decimal
 import nautilus_trader
 
 from quant_runtime.adapters.data.markethub.cache import MarketHubCache
+from quant_runtime.adapters.data.markethub.futures_model import CanonicalFuturesDataset
 from quant_runtime.adapters.formal.nautilus.china_market_rules import FeeSpec
+from quant_runtime.adapters.formal.nautilus.futures_config import FuturesExecutionConfig
+from quant_runtime.adapters.formal.nautilus.futures_runner import run_futures_engine
 from quant_runtime.adapters.formal.nautilus.runner import (
     BASE_ARTIFACTS,
     FormalConfig,
@@ -43,12 +46,26 @@ class NautilusWorkspaceAdapter:
             value.package.resolve_entrypoint("formal", self.name),
         )
         config = _formal_config(value)
-        result = run_engine(
-            dataset,
-            config,
-            value.output,
-            strategy_class=strategy_class,
-        )
+        if isinstance(dataset, CanonicalFuturesDataset):
+            result = run_futures_engine(
+                dataset,
+                _futures_config(value),
+                config.strategy,
+                value.output,
+                strategy_class=strategy_class,
+                decision_intents=value.package.decision_intents,
+            )
+        else:
+            if value.package.asset_classes != frozenset(
+                {"equity"}
+            ) or value.package.frequencies != frozenset({"1d"}):
+                raise ValueError("daily equity snapshot requires an equity/1d strategy package")
+            result = run_engine(
+                dataset,
+                config,
+                value.output,
+                strategy_class=strategy_class,
+            )
         evidence = tuple(
             artifact_records(value.output, [value.output / name for name in BASE_ARTIFACTS])
         )
@@ -106,3 +123,14 @@ def _formal_config(value: FormalRunInput) -> FormalConfig:
         ),
     )
     return config
+
+
+def _futures_config(value: FormalRunInput) -> FuturesExecutionConfig:
+    if value.package.asset_classes != frozenset({"futures"}):
+        raise ValueError("futures snapshot requires package asset_classes=['futures']")
+    if value.package.frequencies != frozenset({"1m"}):
+        raise ValueError("futures snapshot requires package frequencies=['1m']")
+    execution = value.config.get("execution", value.config)
+    if not isinstance(execution, dict):
+        raise ValueError("formal config execution must be an object")
+    return FuturesExecutionConfig.from_dict(execution)

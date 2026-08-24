@@ -50,6 +50,18 @@ class StrategyPackage:
         return frozenset(str(item) for item in requirements.get("capabilities", []))
 
     @property
+    def asset_classes(self) -> frozenset[str]:
+        return self._requirement_values("asset_classes")
+
+    @property
+    def frequencies(self) -> frozenset[str]:
+        return self._requirement_values("frequencies")
+
+    @property
+    def decision_intents(self) -> frozenset[str]:
+        return self._requirement_values("decision_intents")
+
+    @property
     def discovery_policy(self) -> str:
         pipeline = self.manifest.get("pipeline", {})
         if not isinstance(pipeline, dict):
@@ -75,3 +87,12 @@ class StrategyPackage:
             raise ValueError(
                 f"strategy package has no {role} implementation for {backend_id!r}"
             ) from exc
+
+    def _requirement_values(self, name: str) -> frozenset[str]:
+        requirements = self.manifest.get("requirements", {})
+        if not isinstance(requirements, dict):
+            raise ValueError("strategy package requirements must be an object")
+        values = requirements.get(name, [])
+        if not isinstance(values, list):
+            raise ValueError(f"strategy package requirements.{name} must be an array")
+        return frozenset(str(item) for item in values)
