@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from quant_runtime.entrypoint import load_package_entrypoint
 from quant_runtime.package import StrategyPackage
 from quant_runtime.registry import production_registry
 
@@ -46,3 +47,18 @@ def test_strategy_package_requires_an_explicit_materialized_root(tmp_path: Path)
         StrategyPackage.from_record(record)  # type: ignore[call-arg]
     with pytest.raises(ValueError, match="not materialized"):
         StrategyPackage.from_record(record, root=tmp_path / "missing")
+
+
+def test_package_entrypoint_supports_python_dataclasses(tmp_path: Path) -> None:
+    source = tmp_path / "strategy.py"
+    source.write_text(
+        "from dataclasses import dataclass\n"
+        "@dataclass\n"
+        "class StrategyConfig:\n"
+        "    lookback: int = 20\n",
+        encoding="utf-8",
+    )
+
+    config_class = load_package_entrypoint(tmp_path, "strategy.py:StrategyConfig")
+
+    assert config_class().lookback == 20

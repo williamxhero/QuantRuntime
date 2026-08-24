@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,16 @@ def load_package_entrypoint(package_root: Path, entrypoint: str) -> Any:
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load package entrypoint: {entrypoint!r}")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    previous = sys.modules.get(module_name)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+        raise
     try:
         return getattr(module, attribute)
     except AttributeError as exc:
