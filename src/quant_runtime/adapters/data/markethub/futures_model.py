@@ -144,8 +144,6 @@ class CanonicalFuturesBar:
             raise ValueError(f"invalid futures open interest: {self.identity}")
         if self.volume < 0:
             raise ValueError(f"negative futures volume or open interest: {self.identity}")
-        if min(self.signal_open, self.signal_high, self.signal_low, self.signal_close) <= 0:
-            raise ValueError(f"non-positive signal price: {self.identity}")
         if min(self.economic_open, self.economic_high, self.economic_low, self.economic_close) <= 0:
             raise ValueError(f"non-positive economic price: {self.identity}")
         if self.signal_high < max(self.signal_open, self.signal_low, self.signal_close):

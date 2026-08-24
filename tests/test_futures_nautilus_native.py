@@ -432,3 +432,21 @@ def test_signal_context_maps_night_session_to_frozen_trading_day() -> None:
     assert signal.open_interest is None
     assert signal.signal_close == Decimal("100")
     assert signal.economic_close == Decimal("110")
+
+
+def test_back_adjusted_signal_space_can_cross_zero_when_economic_prices_are_positive() -> None:
+    bar = CanonicalFuturesBar(
+        bar_time=datetime(2015, 10, 12, 14, 51, tzinfo=ZoneInfo("Asia/Shanghai")),
+        instrument="jL0",
+        signal_open=Decimal("1"),
+        signal_high=Decimal("1"),
+        signal_low=Decimal("0"),
+        signal_close=Decimal("0.5"),
+        volume=Decimal("2386"),
+        open_interest=None,
+        adjustment_offset=Decimal("741.5"),
+    )
+
+    bar.validate()
+
+    assert bar.economic_low == Decimal("741.5")
