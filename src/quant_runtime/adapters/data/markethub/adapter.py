@@ -190,16 +190,25 @@ class MarketHubDataAdapter:
     ) -> SnapshotVerification:
         client = self._client_factory(request)
         if request.frequency == "1m":
-            include_contract_catalog = (
-                expected_revision is None or ";future_contract_reference:" in expected_revision
-            )
-            dataset = client.fetch_futures_dataset(
-                request.instruments,
-                request.start,
-                request.end,
-                series_type=str(request.contract_mapping),
-                include_contract_catalog=include_contract_catalog,
-            )
+            if request.partial_publication is not None:
+                dataset = client.fetch_partial_futures_dataset(
+                    request.instruments,
+                    request.start,
+                    request.end,
+                    series_type=str(request.contract_mapping),
+                    publication=request.partial_publication,
+                )
+            else:
+                include_contract_catalog = (
+                    expected_revision is None or ";future_contract_reference:" in expected_revision
+                )
+                dataset = client.fetch_futures_dataset(
+                    request.instruments,
+                    request.start,
+                    request.end,
+                    series_type=str(request.contract_mapping),
+                    include_contract_catalog=include_contract_catalog,
+                )
         else:
             dataset = client.fetch_dataset(
                 request.instruments,
@@ -292,9 +301,21 @@ class MarketHubDataAdapter:
             "endpoint_contract": request.endpoint_contract,
             "base_url": request.base_url,
             "data_revision": revision,
+            **(
+                {"partial_publication": request.partial_publication.as_dict()}
+                if request.partial_publication is not None
+                else {}
+            ),
         }
 
     def _resolve_revision(self, request: SnapshotRequest) -> str:
+        if request.frequency == "1m" and request.partial_publication is not None:
+            publication = request.partial_publication
+            return (
+                f"{publication.dataset_id}:{publication.dataset_version};"
+                f"partial_completeness:{publication.partial_completeness_revision};"
+                f"generation_pin:{publication.generation_pin}"
+            )
         health = self._client_factory(request).open()
         if request.frequency == "1m":
             if not health.futures_1m_dataset_version:

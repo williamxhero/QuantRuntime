@@ -6,6 +6,43 @@ from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
+class PartialFuturesPublication:
+    dataset_id: str
+    dataset_version: str
+    partial_completeness_revision: str
+    generation_pin: str
+
+    @classmethod
+    def from_dict(cls, value: Any) -> PartialFuturesPublication:
+        if not isinstance(value, dict) or set(value) != {
+            "dataset_id",
+            "dataset_version",
+            "partial_completeness_revision",
+            "generation_pin",
+        }:
+            raise ValueError("partial futures publication requires exactly four frozen identities")
+        result = cls(**{key: str(item) for key, item in value.items()})
+        if not all(
+            (
+                result.dataset_id,
+                result.dataset_version,
+                result.partial_completeness_revision,
+                result.generation_pin,
+            )
+        ):
+            raise ValueError("partial futures publication identities cannot be empty")
+        return result
+
+    def as_dict(self) -> dict[str, str]:
+        return {
+            "dataset_id": self.dataset_id,
+            "dataset_version": self.dataset_version,
+            "partial_completeness_revision": self.partial_completeness_revision,
+            "generation_pin": self.generation_pin,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class SnapshotRequest:
     adapter: str
     snapshot_mode: str
@@ -20,6 +57,7 @@ class SnapshotRequest:
     adjustment: str
     calendar: str
     contract_mapping: str | None
+    partial_publication: PartialFuturesPublication | None = None
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> SnapshotRequest:
@@ -41,6 +79,11 @@ class SnapshotRequest:
             calendar=str(query.get("calendar", "cn-equity-v1")),
             contract_mapping=(
                 str(query["contract_mapping"]) if query.get("contract_mapping") else None
+            ),
+            partial_publication=(
+                PartialFuturesPublication.from_dict(value["partial_publication"])
+                if value.get("partial_publication") is not None
+                else None
             ),
         )
         request.validate()
@@ -77,6 +120,13 @@ class SnapshotRequest:
                 raise ValueError(
                     "back-adjusted futures snapshots require adjustment='back_adjusted'"
                 )
+            if (
+                self.partial_publication is not None
+                and self.endpoint_contract != "futures-1m-partial-v1"
+            ):
+                raise ValueError(
+                    "partial futures snapshots require endpoint_contract='futures-1m-partial-v1'"
+                )
         else:
             raise ValueError(f"unsupported MarketHub frequency {self.frequency!r}")
         if self.snapshot_mode == "materialized" and self.trust_policy == "mutable":
@@ -89,6 +139,11 @@ class SnapshotRequest:
                 "adapter": self.adapter,
                 "endpoint_contract": self.endpoint_contract,
                 "base_url": self.base_url,
+                **(
+                    {"partial_publication": self.partial_publication.as_dict()}
+                    if self.partial_publication is not None
+                    else {}
+                ),
             },
             "query": {
                 "instruments": list(self.instruments),
@@ -115,6 +170,7 @@ class SnapshotRequest:
                 "local_cache": "none",
                 "endpoint_contract": source.get("endpoint_contract"),
                 "base_url": source.get("base_url"),
+                "partial_publication": source.get("partial_publication"),
                 "query": {
                     **query,
                     "calendar": value.get("calendar", "cn-equity-v1"),

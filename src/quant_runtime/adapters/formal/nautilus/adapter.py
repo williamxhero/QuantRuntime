@@ -66,9 +66,11 @@ class NautilusWorkspaceAdapter:
                 value.output,
                 strategy_class=strategy_class,
             )
-        evidence = tuple(
-            artifact_records(value.output, [value.output / name for name in BASE_ARTIFACTS])
-        )
+        paths = [value.output / name for name in BASE_ARTIFACTS]
+        partial_lineage = value.output / "partial_snapshot_lineage.json"
+        if partial_lineage.exists():
+            paths.append(partial_lineage)
+        evidence = tuple(artifact_records(value.output, paths))
         return FormalAdapterResult(
             formal_id=formal_id,
             backend_id=self.name,

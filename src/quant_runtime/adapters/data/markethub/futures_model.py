@@ -337,6 +337,7 @@ class CanonicalFuturesDataset:
     instruments: tuple[CanonicalFuturesInstrument, ...]
     bars: tuple[CanonicalFuturesBar, ...] | CanonicalFuturesBars
     contract_catalog: FuturesContractCatalogIdentity | None = None
+    partial_lineage: dict[str, Any] | None = None
     _validated: bool = field(default=False, init=False, repr=False, compare=False)
     _input_hash: str | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -345,6 +346,13 @@ class CanonicalFuturesDataset:
             return
         if not self.data_version or not self.dataset_version:
             raise ValueError("canonical futures dataset requires both version identities")
+        if self.partial_lineage is not None:
+            publication = self.partial_lineage.get("publication")
+            if (
+                not isinstance(publication, dict)
+                or publication.get("dataset_id") != self.data_version
+            ):
+                raise ValueError("partial futures lineage does not match dataset identity")
         if self.timezone != "Asia/Shanghai" or self.series_type not in {
             "back_adjusted_continuous",
             "main_continuous",
@@ -380,6 +388,8 @@ class CanonicalFuturesDataset:
         }
         if self.contract_catalog is not None:
             metadata["contract_catalog"] = self.contract_catalog.hash_record()
+        if self.partial_lineage is not None:
+            metadata["partial_lineage"] = self.partial_lineage
         digest = sha256()
         digest.update(b'{"bars":[')
         for index, item in enumerate(self.bars):
@@ -397,6 +407,14 @@ class CanonicalFuturesDataset:
         revision = f"{self.data_version}:{self.dataset_version}"
         if self.contract_catalog is not None:
             revision += f";future_contract_reference:{self.contract_catalog.dataset_version}"
+        if self.partial_lineage is not None:
+            publication = self.partial_lineage["publication"]
+            revision += (
+                f";partial_completeness:{publication['partial_completeness_revision']}"
+                f";generation_pin:{publication['generation_pin']}"
+                f";qmi:{self.partial_lineage['qmi_id']}"
+                f";catalog:{self.partial_lineage['catalog_identity']}"
+            )
         return revision
 
     @property

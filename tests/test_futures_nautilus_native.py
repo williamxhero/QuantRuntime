@@ -16,6 +16,7 @@ from quant_runtime.adapters.data.markethub import (
     MarketHubContractError,
     MarketHubDataAdapter,
 )
+from quant_runtime.adapters.data.markethub.contract import SnapshotRequest
 from quant_runtime.adapters.data.markethub.futures_model import (
     CanonicalFuturesBar,
     CanonicalFuturesBars,
@@ -23,7 +24,9 @@ from quant_runtime.adapters.data.markethub.futures_model import (
     CanonicalFuturesInstrument,
 )
 from quant_runtime.adapters.formal.nautilus import FuturesExecutionConfig, FuturesStrategyContext
+from quant_runtime.adapters.formal.nautilus.futures_runner import run_futures_engine
 from quant_runtime.adapters.formal.nautilus.runner import StrategyContext
+from quant_runtime.entrypoint import load_package_entrypoint
 from quant_runtime.executor import RuntimeExecutor
 from quant_runtime.registry import production_registry
 
@@ -117,6 +120,94 @@ class FuturesTransport:
             raise AssertionError(f"unexpected request {method} {path}")
         payload = json.dumps(value).encode()
         return deepcopy(value), len(payload), 0.001
+
+
+class PartialFuturesTransport:
+    publication = {
+        "dataset_id": "future_1m_partial_s000012_quotemux",
+        "dataset_version": "qmp-v1-fixture",
+        "partial_completeness_revision": "qmc-v1-fixture",
+        "generation_pin": "qmg-v1-fixture",
+    }
+
+    def __init__(self, *, repeated_cursor: bool = False) -> None:
+        self.paths: list[str] = []
+        self.repeated_cursor = repeated_cursor
+        self.bar_reads = 0
+
+    def request_json_with_headers(self, method, path, *, query=None, body=None):
+        del body
+        self.paths.append(path)
+        assert method == "GET"
+        assert query is not None
+        assert {key: query[key] for key in self.publication} == self.publication
+        assert query["codes"] == "ag"
+        meta = {
+            **self.publication,
+            "qmi_id": "qmi-v1-fixture",
+            "catalog_identity": "qmf-catalog-v1-fixture",
+            "source_boundary_manifest": {"count": 1, "sha256": "a" * 64},
+            "source_manifests": [{"source_key": "fixture", "lineage": "observed"}],
+            "lineage_limitations": "fixture partial data is not session complete",
+            "missing_bar_semantics": "skip",
+            "session_grid": "not_asserted_complete",
+            "partial_contract_satisfied": True,
+            "next_cursor": None,
+        }
+        if path.endswith("/coverage"):
+            value = {
+                "items": [
+                    {
+                        "product_code": "ag",
+                        "exchange": "SHFE",
+                        "start_time": "2025-01-02 09:01:00",
+                        "end_time": "2025-01-02 09:03:00",
+                        "status": "accepted",
+                        "observed_count": 3,
+                    }
+                ],
+                "meta": meta,
+            }
+        elif path.endswith("/partial"):
+            self.bar_reads += 1
+            value = {
+                "items": (
+                    []
+                    if self.repeated_cursor and self.bar_reads > 1
+                    else [
+                        {
+                            "product_code": "ag",
+                            "exchange": "SHFE",
+                            "series_type": "back_adjusted_continuous",
+                            "bar_time": f"2025-01-02 09:0{minute}:00",
+                            "open": close,
+                            "high": str(int(close) + 1),
+                            "low": str(int(close) - 1),
+                            "close": close,
+                            "volume": "100",
+                            "open_interest": None,
+                            "adjustment_offset": "10",
+                            "boundary_ids": ["qmb-v1-fixture"],
+                            "source_keys": ["fixture"],
+                        }
+                        for minute, close in enumerate(("100", "101", "102"), start=1)
+                    ]
+                ),
+                "meta": meta,
+            }
+            if self.repeated_cursor:
+                value["meta"]["next_cursor"] = "fixture-repeated-cursor"
+        else:
+            raise AssertionError(f"unexpected partial request {path}")
+        headers = {
+            "x-markethub-dataset-version": self.publication["dataset_version"],
+            "x-markethub-partial-completeness-revision": self.publication[
+                "partial_completeness_revision"
+            ],
+            "x-markethub-generation-pin": self.publication["generation_pin"],
+        }
+        payload = json.dumps(value).encode()
+        return deepcopy(value), len(payload), 0.001, headers
 
 
 def snapshot(*, catalog_bound: bool = False) -> dict:
@@ -226,6 +317,23 @@ def request(
             "formal": [
                 {"id": "primary", "adapter": "nautilus", "config": config or formal_config()}
             ],
+        },
+    }
+
+
+def partial_snapshot() -> dict:
+    return {
+        **snapshot(),
+        "trust_policy": "verified_immutable",
+        "source": {
+            **snapshot()["source"],
+            "endpoint_contract": "futures-1m-partial-v1",
+            "data_revision": (
+                "future_1m_partial_s000012_quotemux:qmp-v1-fixture;"
+                "partial_completeness:qmc-v1-fixture;generation_pin:qmg-v1-fixture;"
+                "qmi:qmi-v1-fixture;catalog:qmf-catalog-v1-fixture"
+            ),
+            "partial_publication": PartialFuturesTransport.publication,
         },
     }
 
@@ -389,6 +497,54 @@ def test_futures_fails_closed_on_missing_contract_specs_and_adjustment_offset(
     )
     assert offset_failed["status"] == "failed"
     assert "numeric value is null" in offset_failed["error"]["message"]
+
+
+def test_partial_futures_snapshot_uses_only_public_partial_contract_and_preserves_lineage(
+    tmp_path: Path,
+) -> None:
+    transport = PartialFuturesTransport()
+    manifest = partial_snapshot()
+    request_value = SnapshotRequest.from_manifest(manifest)
+    adapter = MarketHubDataAdapter(client_factory=lambda _: MarketHubClient(transport=transport))
+    verification = adapter.read(request_value, expected_revision=None)
+
+    assert transport.paths == [
+        "/api/futures/quotes/1m/partial/coverage",
+        "/api/futures/quotes/1m/partial",
+    ]
+    assert verification.dataset.dataset_version == "qmp-v1-fixture"
+    assert verification.dataset.partial_lineage is not None
+    assert verification.dataset.partial_lineage["qmi_id"] == "qmi-v1-fixture"
+    assert verification.dataset.partial_lineage["missing_bar_semantics"] == "skip"
+
+    output = tmp_path / "partial-formal"
+    result = run_futures_engine(
+        verification.dataset,
+        FuturesExecutionConfig.from_dict(formal_config()["execution"]),
+        StrategyContext("test.partial", 1, "a" * 64, "b" * 64, {}),
+        output,
+        strategy_class=load_package_entrypoint(PACKAGE, "strategy.py:NativeFuturesFixtureStrategy"),
+        decision_intents=frozenset({"order"}),
+    )
+
+    assert result.metrics["partial_snapshot"]["qmi_id"] == "qmi-v1-fixture"
+    lineage = json.loads((output / "partial_snapshot_lineage.json").read_text())
+    assert lineage["missing_bar_semantics"] == "skip"
+    statistics = json.loads((output / "native_statistics.json").read_text())
+    assert statistics["partial_snapshot_lineage"]["catalog_identity"] == "qmf-catalog-v1-fixture"
+
+
+def test_partial_futures_fails_closed_on_repeated_cursor() -> None:
+    with pytest.raises(MarketHubContractError, match="cursor is invalid or repeated"):
+        MarketHubClient(
+            transport=PartialFuturesTransport(repeated_cursor=True)
+        ).fetch_partial_futures_dataset(
+            ("agL0",),
+            date(2025, 1, 2),
+            date(2025, 1, 2),
+            series_type="back_adjusted_continuous",
+            publication=SnapshotRequest.from_manifest(partial_snapshot()).partial_publication,
+        )
 
 
 def test_signal_context_maps_night_session_to_frozen_trading_day() -> None:

@@ -156,6 +156,9 @@ def run_futures_engine(
             analyzer=engine.portfolio.analyzer,
             account=engine.portfolio.account(FUTURES_VENUE),
         )
+        if dataset.partial_lineage is not None:
+            statistics["partial_snapshot_lineage"] = dataset.partial_lineage
+            write_json(output / "partial_snapshot_lineage.json", dataset.partial_lineage)
         write_json(output / "native_statistics.json", statistics)
         formal = FormalOutput(
             framework_version=nautilus_trader.__version__,
@@ -198,6 +201,7 @@ def run_futures_engine(
                     if dataset.contract_catalog is not None
                     else None
                 ),
+                "partial_snapshot": dataset.partial_lineage,
             },
         )
         write_normalized_output(output, formal)

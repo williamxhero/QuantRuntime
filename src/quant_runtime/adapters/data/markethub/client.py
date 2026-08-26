@@ -12,6 +12,7 @@ import httpx
 
 from .calendar import canonical_trading_days
 from .catalog import CanonicalInstrument
+from .contract import PartialFuturesPublication
 from .futures_model import (
     CanonicalFuturesBarChunk,
     CanonicalFuturesBars,
@@ -26,6 +27,7 @@ from .model import CanonicalBar, CanonicalDataset
 SHANGHAI = ZoneInfo("Asia/Shanghai")
 FUTURES_PAGE_SIZE = 500_000
 FUTURES_DATASET_PAGE_SIZE = 200_000
+PARTIAL_FUTURES_PAGE_SIZE = 10_000
 
 
 class MarketHubContractError(RuntimeError):
@@ -76,6 +78,19 @@ class HttpxJsonTransport:
         query: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
     ) -> tuple[Any, int, float]:
+        value, response_bytes, elapsed, _ = self.request_json_with_headers(
+            method, path, query=query, body=body
+        )
+        return value, response_bytes, elapsed
+
+    def request_json_with_headers(
+        self,
+        method: str,
+        path: str,
+        *,
+        query: dict[str, Any] | None = None,
+        body: dict[str, Any] | None = None,
+    ) -> tuple[Any, int, float, dict[str, str]]:
         started = perf_counter()
         try:
             response = httpx.request(
@@ -97,7 +112,7 @@ class HttpxJsonTransport:
             decoded = json.loads(response.content, parse_float=Decimal)
         except json.JSONDecodeError as exc:
             raise MarketHubContractError(f"{method} {path} returned invalid JSON") from exc
-        return decoded, len(response.content), elapsed
+        return decoded, len(response.content), elapsed, dict(response.headers)
 
 
 class MarketHubClient:
@@ -306,6 +321,208 @@ class MarketHubClient:
                 f"canonical futures dataset validation failed: {exc}"
             ) from exc
         return dataset
+
+    def fetch_partial_futures_dataset(
+        self,
+        instruments: tuple[str, ...],
+        start_date: date,
+        end_date: date,
+        *,
+        series_type: str,
+        publication: PartialFuturesPublication,
+    ) -> CanonicalFuturesDataset:
+        if series_type != "back_adjusted_continuous":
+            raise MarketHubContractError("partial futures only supports back_adjusted_continuous")
+        products = {item: product_code_from_instrument(item) for item in instruments}
+        if len({item.casefold() for item in products.values()}) != len(products):
+            raise MarketHubContractError("futures instruments map to duplicate product codes")
+        _, coverage = self._partial_coverage(
+            publication, tuple(products.values()), start_date, end_date
+        )
+        coverage_by_product: dict[str, list[dict[str, Any]]] = {}
+        for item in coverage:
+            coverage_by_product.setdefault(str(item.get("product_code", "")).casefold(), []).append(
+                item
+            )
+        chunks_by_instrument: dict[str, tuple[CanonicalFuturesBarChunk, ...]] = {}
+        native_instruments: list[CanonicalFuturesInstrument] = []
+        lineage_meta: dict[str, Any] | None = None
+        for instrument, product in products.items():
+            if product.casefold() not in coverage_by_product:
+                raise MarketHubContractError(f"partial futures coverage lacks product {product!r}")
+            coverage_items = coverage_by_product[product.casefold()]
+            if not all(
+                item.get("status") == "accepted" and int(item.get("observed_count", 0)) > 0
+                for item in coverage_items
+            ):
+                raise MarketHubContractError(
+                    f"partial futures coverage is unusable for {product!r}"
+                )
+            pages = self._iter_partial_futures_pages(publication, product, start_date, end_date)
+            chunks: list[CanonicalFuturesBarChunk] = []
+            native: CanonicalFuturesInstrument | None = None
+            for rows, metadata in pages:
+                if lineage_meta is None:
+                    lineage_meta = metadata
+                elif _partial_identity(metadata) != _partial_identity(lineage_meta):
+                    raise MarketHubContractError("partial futures lineage drifted during read")
+                if native is None:
+                    native = CanonicalFuturesInstrument(
+                        instrument=instrument,
+                        product_code=product,
+                        exchange=str(rows[0].get("exchange", "")),
+                        series_type=series_type,
+                    )
+                self._validate_partial_rows(rows, product)
+                try:
+                    chunks.append(
+                        CanonicalFuturesBarChunk.from_rows(
+                            rows, {product.casefold(): native}, parse_time=_parse_futures_time
+                        )
+                    )
+                except ValueError as exc:
+                    raise MarketHubContractError(
+                        f"invalid canonical partial futures data: {exc}"
+                    ) from exc
+            if native is None or not chunks:
+                raise MarketHubContractError(
+                    f"partial futures has no observed rows for {instrument!r}"
+                )
+            native_instruments.append(native)
+            chunks_by_instrument[instrument] = tuple(chunks)
+        ordered = tuple(sorted(native_instruments, key=lambda item: item.instrument))
+        dataset = CanonicalFuturesDataset(
+            data_version=publication.dataset_id,
+            dataset_version=publication.dataset_version,
+            timezone="Asia/Shanghai",
+            series_type=series_type,
+            instruments=ordered,
+            bars=CanonicalFuturesBars(
+                tuple(chunks_by_instrument[item.instrument] for item in ordered)
+            ),
+            partial_lineage={
+                "publication": publication.as_dict(),
+                "qmi_id": _require_partial_lineage(lineage_meta, "qmi_id"),
+                "catalog_identity": _require_partial_lineage(lineage_meta, "catalog_identity"),
+                "source_boundary_manifest": _require_partial_lineage(
+                    lineage_meta, "source_boundary_manifest"
+                ),
+                "source_manifests": _require_partial_lineage(lineage_meta, "source_manifests"),
+                "lineage_limitations": _require_partial_lineage(
+                    lineage_meta, "lineage_limitations"
+                ),
+                "missing_bar_semantics": "skip",
+                "session_grid": "not_asserted_complete",
+            },
+        )
+        try:
+            dataset.validate()
+        except ValueError as exc:
+            raise MarketHubContractError(
+                f"canonical partial futures dataset validation failed: {exc}"
+            ) from exc
+        return dataset
+
+    def _partial_coverage(self, publication, products, start_date, end_date):
+        response, headers = self._request_with_headers(
+            "GET",
+            "/api/futures/quotes/1m/partial/coverage",
+            query=self._partial_query(
+                publication, products, start_date, end_date, limit=PARTIAL_FUTURES_PAGE_SIZE
+            ),
+        )
+        return self._validate_partial_response(response, headers, publication, "coverage")
+
+    def _iter_partial_futures_pages(self, publication, product, start_date, end_date):
+        cursor = None
+        previous: datetime | None = None
+        seen_cursors: set[str] = set()
+        while True:
+            query = self._partial_query(
+                publication, (product,), start_date, end_date, limit=PARTIAL_FUTURES_PAGE_SIZE
+            )
+            if cursor is not None:
+                query["cursor"] = cursor
+            response, headers = self._request_with_headers(
+                "GET", "/api/futures/quotes/1m/partial", query=query
+            )
+            meta, rows = self._validate_partial_response(response, headers, publication, "bars")
+            for row in rows:
+                timestamp = _parse_futures_time(row.get("bar_time"))
+                if previous is not None and timestamp <= previous:
+                    raise MarketHubContractError(
+                        f"partial futures ordering violation at {product}/{timestamp.isoformat()}"
+                    )
+                previous = timestamp
+            if rows:
+                yield tuple(rows), meta
+            next_cursor = meta.get("next_cursor")
+            if next_cursor is None:
+                return
+            if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
+                raise MarketHubContractError("partial futures cursor is invalid or repeated")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+
+    @staticmethod
+    def _partial_query(publication, products, start_date, end_date, *, limit):
+        return {
+            **publication.as_dict(),
+            "codes": ",".join(products),
+            "start_time": f"{start_date.isoformat()} 00:00:00",
+            "end_time": f"{end_date.isoformat()} 23:59:00",
+            "limit": limit,
+        }
+
+    def _validate_partial_response(self, response, headers, publication, kind):
+        if not isinstance(response, dict) or not isinstance(response.get("meta"), dict):
+            raise MarketHubContractError(f"partial futures {kind} response shape is invalid")
+        meta = response["meta"]
+        if meta.get("partial_contract_satisfied") is not True:
+            raise MarketHubContractError("partial futures contract is not satisfied")
+        if meta.get("missing_bar_semantics") != "skip":
+            raise MarketHubContractError("partial futures missing-bar semantics drifted")
+        if kind == "bars" and meta.get("session_grid") != "not_asserted_complete":
+            raise MarketHubContractError("partial futures session grid drifted")
+        for key, expected in publication.as_dict().items():
+            if str(meta.get(key, "")) != expected:
+                raise MarketHubContractError(f"partial futures {key} mismatch")
+        for header, expected in {
+            "x-markethub-dataset-version": publication.dataset_version,
+            "x-markethub-partial-completeness-revision": publication.partial_completeness_revision,
+            "x-markethub-generation-pin": publication.generation_pin,
+        }.items():
+            if headers.get(header, "") != expected:
+                raise MarketHubContractError(f"partial futures header {header} mismatch")
+        required = (
+            "qmi_id",
+            "catalog_identity",
+            "source_boundary_manifest",
+            "source_manifests",
+            "lineage_limitations",
+        )
+        if kind == "bars" and any(not meta.get(key) for key in required):
+            raise MarketHubContractError("partial futures lineage is incomplete")
+        items = response.get("items")
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            raise MarketHubContractError(f"partial futures {kind} items are invalid")
+        return meta, items
+
+    @staticmethod
+    def _validate_partial_rows(rows, product):
+        for row in rows:
+            if str(row.get("product_code", "")).casefold() != product.casefold():
+                raise MarketHubContractError("partial futures returned an unrequested product")
+            if str(row.get("series_type", "")) != "back_adjusted_continuous":
+                raise MarketHubContractError("partial futures series type drifted")
+            boundaries, sources = row.get("boundary_ids"), row.get("source_keys")
+            if (
+                not isinstance(boundaries, list)
+                or not boundaries
+                or not isinstance(sources, list)
+                or not sources
+            ):
+                raise MarketHubContractError("partial futures row lacks source boundary lineage")
 
     def fetch_futures_contracts(
         self,
@@ -670,6 +887,25 @@ class MarketHubClient:
         self.metrics.fetch_seconds += elapsed
         return decoded
 
+    def _request_with_headers(
+        self,
+        method: str,
+        path: str,
+        *,
+        query: dict[str, Any] | None = None,
+        body: dict[str, Any] | None = None,
+    ) -> tuple[Any, dict[str, str]]:
+        request = getattr(self._transport, "request_json_with_headers", None)
+        if not callable(request):
+            raise MarketHubContractError("partial futures transport must expose response headers")
+        decoded, response_bytes, elapsed, headers = request(method, path, query=query, body=body)
+        if not isinstance(headers, dict):
+            raise MarketHubContractError("partial futures response headers are invalid")
+        self.metrics.request_count += 1
+        self.metrics.response_bytes += response_bytes
+        self.metrics.fetch_seconds += elapsed
+        return decoded, {str(key).casefold(): str(value) for key, value in headers.items()}
+
     def _require_open(self) -> HealthVector:
         if self._health is None:
             raise MarketHubContractError("MarketHub client is not open")
@@ -698,3 +934,23 @@ def _catalog_native_fields(value: dict[str, Any] | None) -> dict[str, Any]:
         "price_precision": value["price_precision"],
         "tick_size": value["tick_size"],
     }
+
+
+def _partial_identity(meta: dict[str, Any]) -> tuple[str, str, str, str, str, str]:
+    return tuple(
+        str(meta.get(key, ""))
+        for key in (
+            "dataset_id",
+            "dataset_version",
+            "partial_completeness_revision",
+            "generation_pin",
+            "qmi_id",
+            "catalog_identity",
+        )
+    )
+
+
+def _require_partial_lineage(value: dict[str, Any] | None, key: str) -> Any:
+    if value is None or not value.get(key):
+        raise MarketHubContractError(f"partial futures lineage lacks {key}")
+    return value[key]
