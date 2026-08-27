@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, DecimalException
 from hashlib import sha256
 from heapq import heappop, heappush
-from time import perf_counter
+from time import perf_counter, sleep
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
@@ -34,10 +35,16 @@ SHANGHAI = ZoneInfo("Asia/Shanghai")
 FUTURES_PAGE_SIZE = 500_000
 FUTURES_DATASET_PAGE_SIZE = 200_000
 PARTIAL_FUTURES_PAGE_SIZE = 10_000
+PARTIAL_FUTURES_MIN_PAGE_SIZE = 1_000
+MARKETHUB_RETRY_DELAYS = (1, 2, 4)
 
 
 class MarketHubContractError(RuntimeError):
     """MarketHub could not satisfy the frozen read contract."""
+
+
+class MarketHubRetryExhausted(MarketHubContractError):
+    """A retryable MarketHub request exhausted its fixed retry budget."""
 
 
 @dataclass(slots=True)
@@ -72,9 +79,10 @@ class JsonTransport(Protocol):
 
 
 class HttpxJsonTransport:
-    def __init__(self, base_url: str, timeout_seconds: float) -> None:
+    def __init__(self, base_url: str, timeout_seconds: float | None = None) -> None:
         self._base_url = base_url.rstrip("/")
-        self._timeout_seconds = timeout_seconds
+        del timeout_seconds
+        self._timeout = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=30.0)
 
     def request_json(
         self,
@@ -98,21 +106,15 @@ class HttpxJsonTransport:
         body: dict[str, Any] | None = None,
     ) -> tuple[Any, int, float, dict[str, str]]:
         started = perf_counter()
-        try:
-            response = httpx.request(
-                method,
-                f"{self._base_url}{path}",
-                params=query,
-                json=body,
-                timeout=self._timeout_seconds,
-                headers={"Accept": "application/json", "User-Agent": "quant-runtime/0.2"},
-            )
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            detail = ""
-            if getattr(exc, "response", None) is not None:
-                detail = exc.response.text[:2000]
-            raise MarketHubContractError(f"{method} {path} failed: {exc}; {detail}") from exc
+        response = httpx.request(
+            method,
+            f"{self._base_url}{path}",
+            params=query,
+            json=body,
+            timeout=self._timeout,
+            headers={"Accept": "application/json", "User-Agent": "quant-runtime/0.2"},
+        )
+        response.raise_for_status()
         elapsed = perf_counter() - started
         try:
             decoded = json.loads(response.content, parse_float=Decimal)
@@ -126,11 +128,13 @@ class MarketHubClient:
         self,
         base_url: str = "http://yosef-server:8803",
         *,
-        timeout_seconds: float = 60.0,
+        timeout_seconds: float | None = None,
         transport: JsonTransport | None = None,
+        sleeper: Callable[[float], None] = sleep,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self._transport = transport or HttpxJsonTransport(self.base_url, timeout_seconds)
+        self._sleeper = sleeper
         self._health: HealthVector | None = None
         self.metrics = FetchMetrics()
 
@@ -579,15 +583,20 @@ class MarketHubClient:
 
     def _iter_partial_pages(self, publication, path, products, start_date, end_date, kind):
         cursor = None
+        limit = PARTIAL_FUTURES_PAGE_SIZE
         previous_meta: dict[str, Any] | None = None
         seen_cursors: set[str] = set()
         while True:
-            query = self._partial_query(
-                publication, products, start_date, end_date, limit=PARTIAL_FUTURES_PAGE_SIZE
-            )
+            query = self._partial_query(publication, products, start_date, end_date, limit=limit)
             if cursor is not None:
                 query["cursor"] = cursor
-            response, headers = self._request_with_headers("GET", path, query=query)
+            try:
+                response, headers = self._request_with_headers("GET", path, query=query)
+            except MarketHubRetryExhausted:
+                if limit <= PARTIAL_FUTURES_MIN_PAGE_SIZE:
+                    raise
+                limit = max(PARTIAL_FUTURES_MIN_PAGE_SIZE, limit // 2)
+                continue
             meta, rows = self._validate_partial_response(response, headers, publication, kind)
             identity = _coverage_identity if kind == "coverage" else _full_partial_lineage_identity
             if previous_meta is not None and identity(meta) != identity(previous_meta):
@@ -1276,8 +1285,8 @@ class MarketHubClient:
         query: dict[str, Any] | None = None,
         body: dict[str, Any] | None = None,
     ) -> Any:
-        decoded, response_bytes, elapsed = self._transport.request_json(
-            method, path, query=query, body=body
+        decoded, response_bytes, elapsed = self._with_retry(
+            lambda: self._transport.request_json(method, path, query=query, body=body), method, path
         )
         self.metrics.request_count += 1
         self.metrics.response_bytes += response_bytes
@@ -1295,7 +1304,9 @@ class MarketHubClient:
         request = getattr(self._transport, "request_json_with_headers", None)
         if not callable(request):
             raise MarketHubContractError("partial futures transport must expose response headers")
-        decoded, response_bytes, elapsed, headers = request(method, path, query=query, body=body)
+        decoded, response_bytes, elapsed, headers = self._with_retry(
+            lambda: request(method, path, query=query, body=body), method, path
+        )
         if not isinstance(headers, dict):
             raise MarketHubContractError("partial futures response headers are invalid")
         self.metrics.request_count += 1
@@ -1303,10 +1314,40 @@ class MarketHubClient:
         self.metrics.fetch_seconds += elapsed
         return decoded, {str(key).casefold(): str(value) for key, value in headers.items()}
 
+    def _with_retry(self, request: Callable[[], Any], method: str, path: str) -> Any:
+        for delay in (*MARKETHUB_RETRY_DELAYS, None):
+            try:
+                return request()
+            except Exception as exc:
+                if not _is_retryable_transport_error(exc):
+                    raise _as_contract_error(method, path, exc) from exc
+                if delay is None:
+                    raise MarketHubRetryExhausted(
+                        f"{method} {path} failed after {len(MARKETHUB_RETRY_DELAYS)} retries: {exc}"
+                    ) from exc
+                self._sleeper(delay)
+        raise AssertionError("unreachable")
+
     def _require_open(self) -> HealthVector:
         if self._health is None:
             raise MarketHubContractError("MarketHub client is not open")
         return self._health
+
+
+def _is_retryable_transport_error(exc: Exception) -> bool:
+    if isinstance(exc, httpx.ConnectError | httpx.ConnectTimeout | httpx.ReadTimeout):
+        return True
+    return isinstance(exc, httpx.HTTPStatusError) and 500 <= exc.response.status_code <= 599
+
+
+def _as_contract_error(method: str, path: str, exc: Exception) -> MarketHubContractError:
+    if isinstance(exc, MarketHubContractError):
+        return exc
+    detail = ""
+    response = getattr(exc, "response", None)
+    if response is not None:
+        detail = f"; {response.text[:2000]}"
+    return MarketHubContractError(f"{method} {path} failed: {exc}{detail}")
 
 
 def _parse_futures_time(value: Any) -> datetime:
