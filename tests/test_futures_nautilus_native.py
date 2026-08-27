@@ -23,8 +23,12 @@ from quant_runtime.adapters.data.markethub.futures_model import (
     CanonicalFuturesDataset,
     CanonicalFuturesInstrument,
 )
+from quant_runtime.adapters.data.markethub.storage import AdapterStorage
 from quant_runtime.adapters.formal.nautilus import FuturesExecutionConfig, FuturesStrategyContext
-from quant_runtime.adapters.formal.nautilus.futures_runner import run_futures_engine
+from quant_runtime.adapters.formal.nautilus.futures_runner import (
+    _signal_batches,
+    run_futures_engine,
+)
 from quant_runtime.adapters.formal.nautilus.runner import StrategyContext
 from quant_runtime.entrypoint import load_package_entrypoint
 from quant_runtime.executor import RuntimeExecutor
@@ -130,10 +134,23 @@ class PartialFuturesTransport:
         "generation_pin": "qmg-v1-fixture",
     }
 
-    def __init__(self, *, repeated_cursor: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        repeated_cursor: bool = False,
+        paged: bool = False,
+        empty_cursor: bool = False,
+        lineage_drift_after_scan: bool = False,
+        coverage_count_delta: int = 0,
+    ) -> None:
         self.paths: list[str] = []
         self.repeated_cursor = repeated_cursor
+        self.paged = paged
+        self.empty_cursor = empty_cursor
+        self.lineage_drift_after_scan = lineage_drift_after_scan
+        self.coverage_count_delta = coverage_count_delta
         self.bar_reads = 0
+        self.coverage_reads = 0
 
     def request_json_with_headers(self, method, path, *, query=None, body=None):
         del body
@@ -155,6 +172,16 @@ class PartialFuturesTransport:
             "next_cursor": None,
         }
         if path.endswith("/coverage"):
+            self.coverage_reads += 1
+            if self.paged and "cursor" not in query:
+                assert "cursor" not in query
+                meta["next_cursor"] = "coverage-page-2"
+                observed_count = 2
+            elif self.paged:
+                assert query["cursor"] == "coverage-page-2"
+                observed_count = 1
+            else:
+                observed_count = 3 + self.coverage_count_delta
             value = {
                 "items": [
                     {
@@ -163,13 +190,24 @@ class PartialFuturesTransport:
                         "start_time": "2025-01-02 09:01:00",
                         "end_time": "2025-01-02 09:03:00",
                         "status": "accepted",
-                        "observed_count": 3,
+                        "observed_count": observed_count,
                     }
                 ],
                 "meta": meta,
             }
         elif path.endswith("/partial"):
             self.bar_reads += 1
+            if self.lineage_drift_after_scan and self.bar_reads > (2 if self.paged else 1):
+                meta["qmi_id"] = "qmi-v1-drifted"
+            if self.paged and "cursor" not in query:
+                assert "cursor" not in query
+                meta["next_cursor"] = "bars-page-2"
+                observed = ((1, "100"), (2, "101"))
+            elif self.paged:
+                assert query["cursor"] == "bars-page-2"
+                observed = ((3, "102"),)
+            else:
+                observed = tuple(enumerate(("100", "101", "102"), start=1))
             value = {
                 "items": (
                     []
@@ -190,13 +228,15 @@ class PartialFuturesTransport:
                             "boundary_ids": ["qmb-v1-fixture"],
                             "source_keys": ["fixture"],
                         }
-                        for minute, close in enumerate(("100", "101", "102"), start=1)
+                        for minute, close in observed
                     ]
                 ),
                 "meta": meta,
             }
             if self.repeated_cursor:
                 value["meta"]["next_cursor"] = "fixture-repeated-cursor"
+            if self.empty_cursor:
+                value["meta"]["next_cursor"] = ""
         else:
             raise AssertionError(f"unexpected partial request {path}")
         headers = {
@@ -545,6 +585,96 @@ def test_partial_futures_fails_closed_on_repeated_cursor() -> None:
             series_type="back_adjusted_continuous",
             publication=SnapshotRequest.from_manifest(partial_snapshot()).partial_publication,
         )
+
+
+def test_partial_futures_paginates_coverage_and_preserves_stream_hash() -> None:
+    transport = PartialFuturesTransport(paged=True)
+    dataset = MarketHubClient(transport=transport).fetch_partial_futures_dataset(
+        ("agL0",),
+        date(2025, 1, 2),
+        date(2025, 1, 2),
+        series_type="back_adjusted_continuous",
+        publication=SnapshotRequest.from_manifest(partial_snapshot()).partial_publication,
+    )
+
+    assert transport.paths[:4] == [
+        "/api/futures/quotes/1m/partial/coverage",
+        "/api/futures/quotes/1m/partial/coverage",
+        "/api/futures/quotes/1m/partial",
+        "/api/futures/quotes/1m/partial",
+    ]
+    expanded = CanonicalFuturesDataset(
+        data_version=dataset.data_version,
+        dataset_version=dataset.dataset_version,
+        timezone=dataset.timezone,
+        series_type=dataset.series_type,
+        instruments=dataset.instruments,
+        bars=tuple(dataset.bars),
+        partial_lineage=dataset.partial_lineage,
+    )
+    assert dataset.input_hash == expanded.input_hash
+    assert dataset.bar_counts == {"agL0": 3}
+
+
+def test_partial_snapshot_open_preflights_without_replaying_bars(tmp_path: Path) -> None:
+    transport = PartialFuturesTransport(paged=True)
+    adapter = MarketHubDataAdapter(client_factory=lambda _: MarketHubClient(transport=transport))
+    request_value = SnapshotRequest.from_manifest(partial_snapshot())
+    resolved = adapter.resolve(request_value, AdapterStorage.create(tmp_path / "resolve"))
+    reads_after_resolution = transport.bar_reads
+
+    opened = adapter.open_snapshot(
+        resolved.manifest,
+        AdapterStorage.create(tmp_path / "open"),
+    )
+
+    assert opened.dataset is not None
+    assert transport.bar_reads == reads_after_resolution
+    assert transport.coverage_reads == 4
+    assert tuple(opened.dataset.bars)
+    assert transport.bar_reads == reads_after_resolution + 2
+
+
+@pytest.mark.parametrize("kwargs", [{"empty_cursor": True}, {"coverage_count_delta": 1}])
+def test_partial_futures_fails_closed_on_bad_cursor_or_coverage(kwargs: dict) -> None:
+    with pytest.raises(MarketHubContractError):
+        MarketHubClient(transport=PartialFuturesTransport(**kwargs)).fetch_partial_futures_dataset(
+            ("agL0",),
+            date(2025, 1, 2),
+            date(2025, 1, 2),
+            series_type="back_adjusted_continuous",
+            publication=SnapshotRequest.from_manifest(partial_snapshot()).partial_publication,
+        )
+
+
+def test_partial_futures_stream_fails_closed_on_second_pass_lineage_drift() -> None:
+    transport = PartialFuturesTransport(paged=True, lineage_drift_after_scan=True)
+    dataset = MarketHubClient(transport=transport).fetch_partial_futures_dataset(
+        ("agL0",),
+        date(2025, 1, 2),
+        date(2025, 1, 2),
+        series_type="back_adjusted_continuous",
+        publication=SnapshotRequest.from_manifest(partial_snapshot()).partial_publication,
+    )
+
+    with pytest.raises(MarketHubContractError, match="lineage drifted"):
+        tuple(dataset.bars)
+
+
+def test_streaming_batches_do_not_split_same_timestamp() -> None:
+    template = CanonicalFuturesBar(
+        bar_time=datetime(2025, 1, 2, 9, 1, tzinfo=ZoneInfo("Asia/Shanghai")),
+        instrument="agL0",
+        signal_open=Decimal("100"),
+        signal_high=Decimal("101"),
+        signal_low=Decimal("99"),
+        signal_close=Decimal("100"),
+        volume=Decimal("1"),
+        open_interest=None,
+        adjustment_offset=Decimal("10"),
+    )
+    same_time = (template, template, template)
+    assert [len(batch) for batch in _signal_batches(same_time, batch_size=2)] == [3]
 
 
 def test_signal_context_maps_night_session_to_frozen_trading_day() -> None:

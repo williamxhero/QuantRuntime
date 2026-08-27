@@ -4,21 +4,27 @@ import json
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, DecimalException
+from hashlib import sha256
+from heapq import heappop, heappush
 from time import perf_counter
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo
 
 import httpx
 
+from quant_runtime.artifacts import canonical_json, sha256_value
+
 from .calendar import canonical_trading_days
 from .catalog import CanonicalInstrument
 from .contract import PartialFuturesPublication
 from .futures_model import (
+    CanonicalFuturesBar,
     CanonicalFuturesBarChunk,
     CanonicalFuturesBars,
     CanonicalFuturesDataset,
     CanonicalFuturesInstrument,
     FuturesContractCatalogIdentity,
+    ReplayablePartialFuturesBars,
     product_code_from_instrument,
 )
 from .lineage import HealthVector
@@ -336,7 +342,7 @@ class MarketHubClient:
         products = {item: product_code_from_instrument(item) for item in instruments}
         if len({item.casefold() for item in products.values()}) != len(products):
             raise MarketHubContractError("futures instruments map to duplicate product codes")
-        _, coverage = self._partial_coverage(
+        coverage_meta, coverage = self._partial_coverage(
             publication, tuple(products.values()), start_date, end_date
         )
         coverage_by_product: dict[str, list[dict[str, Any]]] = {}
@@ -344,9 +350,7 @@ class MarketHubClient:
             coverage_by_product.setdefault(str(item.get("product_code", "")).casefold(), []).append(
                 item
             )
-        chunks_by_instrument: dict[str, tuple[CanonicalFuturesBarChunk, ...]] = {}
         native_instruments: list[CanonicalFuturesInstrument] = []
-        lineage_meta: dict[str, Any] | None = None
         for instrument, product in products.items():
             if product.casefold() not in coverage_by_product:
                 raise MarketHubContractError(f"partial futures coverage lacks product {product!r}")
@@ -358,62 +362,59 @@ class MarketHubClient:
                 raise MarketHubContractError(
                     f"partial futures coverage is unusable for {product!r}"
                 )
-            pages = self._iter_partial_futures_pages(publication, product, start_date, end_date)
-            chunks: list[CanonicalFuturesBarChunk] = []
-            native: CanonicalFuturesInstrument | None = None
-            for rows, metadata in pages:
-                if lineage_meta is None:
-                    lineage_meta = metadata
-                elif _partial_identity(metadata) != _partial_identity(lineage_meta):
-                    raise MarketHubContractError("partial futures lineage drifted during read")
-                if native is None:
-                    native = CanonicalFuturesInstrument(
-                        instrument=instrument,
-                        product_code=product,
-                        exchange=str(rows[0].get("exchange", "")),
-                        series_type=series_type,
-                    )
-                self._validate_partial_rows(rows, product)
-                try:
-                    chunks.append(
-                        CanonicalFuturesBarChunk.from_rows(
-                            rows, {product.casefold(): native}, parse_time=_parse_futures_time
-                        )
-                    )
-                except ValueError as exc:
-                    raise MarketHubContractError(
-                        f"invalid canonical partial futures data: {exc}"
-                    ) from exc
-            if native is None or not chunks:
+            exchange = str(coverage_items[0].get("exchange", ""))
+            if not exchange or any(
+                str(item.get("exchange", "")) != exchange for item in coverage_items
+            ):
                 raise MarketHubContractError(
-                    f"partial futures has no observed rows for {instrument!r}"
+                    f"partial futures coverage exchange drifted for {product!r}"
                 )
-            native_instruments.append(native)
-            chunks_by_instrument[instrument] = tuple(chunks)
+            native_instruments.append(
+                CanonicalFuturesInstrument(
+                    instrument=instrument,
+                    product_code=product,
+                    exchange=exchange,
+                    series_type=series_type,
+                )
+            )
         ordered = tuple(sorted(native_instruments, key=lambda item: item.instrument))
+        lineage = self._partial_lineage(publication, coverage_meta)
+        scan = self._scan_partial_futures(
+            publication, ordered, start_date, end_date, lineage, coverage
+        )
+        verification = {
+            "schema": "quant-runtime.partial-futures-stream-verification.v1",
+            "phase": "snapshot_full_scan",
+            "canonical_input_hash": scan["input_hash"],
+            "bar_counts": scan["bar_counts"],
+            "instrument_bounds": scan["instrument_bounds"],
+            "calendar": scan["calendar"],
+            "coverage": scan["coverage"],
+            "lineage": lineage,
+        }
         dataset = CanonicalFuturesDataset(
             data_version=publication.dataset_id,
             dataset_version=publication.dataset_version,
             timezone="Asia/Shanghai",
             series_type=series_type,
             instruments=ordered,
-            bars=CanonicalFuturesBars(
-                tuple(chunks_by_instrument[item.instrument] for item in ordered)
+            bars=ReplayablePartialFuturesBars(
+                instruments=tuple(item.instrument for item in ordered),
+                bar_counts=scan["bar_counts"],
+                trading_dates=tuple(date.fromisoformat(item) for item in scan["calendar"]),
+                instrument_bounds=scan["instrument_bounds"],
+                verified_input_hash=scan["input_hash"],
+                verification=verification,
+                _stream_factory=lambda: self._verified_partial_stream(
+                    publication,
+                    ordered,
+                    start_date,
+                    end_date,
+                    lineage,
+                    scan,
+                ),
             ),
-            partial_lineage={
-                "publication": publication.as_dict(),
-                "qmi_id": _require_partial_lineage(lineage_meta, "qmi_id"),
-                "catalog_identity": _require_partial_lineage(lineage_meta, "catalog_identity"),
-                "source_boundary_manifest": _require_partial_lineage(
-                    lineage_meta, "source_boundary_manifest"
-                ),
-                "source_manifests": _require_partial_lineage(lineage_meta, "source_manifests"),
-                "lineage_limitations": _require_partial_lineage(
-                    lineage_meta, "lineage_limitations"
-                ),
-                "missing_bar_semantics": "skip",
-                "session_grid": "not_asserted_complete",
-            },
+            partial_lineage=lineage,
         )
         try:
             dataset.validate()
@@ -423,30 +424,148 @@ class MarketHubClient:
             ) from exc
         return dataset
 
-    def _partial_coverage(self, publication, products, start_date, end_date):
-        response, headers = self._request_with_headers(
-            "GET",
-            "/api/futures/quotes/1m/partial/coverage",
-            query=self._partial_query(
-                publication, products, start_date, end_date, limit=PARTIAL_FUTURES_PAGE_SIZE
-            ),
+    def open_partial_futures_stream(
+        self,
+        instruments: tuple[str, ...],
+        start_date: date,
+        end_date: date,
+        *,
+        series_type: str,
+        publication: PartialFuturesPublication,
+        verification: dict[str, Any],
+    ) -> CanonicalFuturesDataset:
+        """Open a previously scanned partial reference without re-reading bars.
+
+        Only the public publication, complete coverage pager, and every lineage
+        field are read here.  The independent formal session validates all bar
+        bytes as it is consumed and refuses to finish on any mismatch.
+        """
+
+        if series_type != "back_adjusted_continuous":
+            raise MarketHubContractError("partial futures only supports back_adjusted_continuous")
+        if not isinstance(verification.get("canonical_input_hash"), str):
+            raise MarketHubContractError("partial futures snapshot lacks canonical verification")
+        products = {item: product_code_from_instrument(item) for item in instruments}
+        coverage_meta, coverage = self._partial_coverage(
+            publication, tuple(products.values()), start_date, end_date
         )
-        return self._validate_partial_response(response, headers, publication, "coverage")
+        lineage = self._partial_lineage(publication, coverage_meta)
+        native = self._partial_instruments(products, coverage, series_type)
+        expected_counts = _coverage_counts(coverage, native)
+        bounds = _coverage_bounds(coverage, native)
+        calendar = _coverage_calendar(coverage)
+        expected = {
+            "input_hash": verification["canonical_input_hash"],
+            "bar_counts": expected_counts,
+            "instrument_bounds": bounds,
+            "coverage": tuple(coverage),
+            "manifest_hashes": {
+                key: verification[key]
+                for key in ("catalog_hash", "calendar_hash", "coverage_hash")
+                if key in verification
+            },
+        }
+        descriptor = {
+            "schema": "quant-runtime.partial-futures-stream-verification.v1",
+            "phase": "formal_preflight",
+            "canonical_input_hash": verification["canonical_input_hash"],
+            "bar_counts": expected_counts,
+            "instrument_bounds": bounds,
+            "calendar": calendar,
+            "coverage": tuple(coverage),
+            "lineage": lineage,
+        }
+        dataset = CanonicalFuturesDataset(
+            data_version=publication.dataset_id,
+            dataset_version=publication.dataset_version,
+            timezone="Asia/Shanghai",
+            series_type=series_type,
+            instruments=native,
+            bars=ReplayablePartialFuturesBars(
+                instruments=tuple(item.instrument for item in native),
+                bar_counts=expected_counts,
+                trading_dates=tuple(date.fromisoformat(item) for item in calendar),
+                instrument_bounds=bounds,
+                verified_input_hash=verification["canonical_input_hash"],
+                verification=descriptor,
+                _stream_factory=lambda: self._verified_partial_stream(
+                    publication, native, start_date, end_date, lineage, expected
+                ),
+            ),
+            partial_lineage=lineage,
+        )
+        try:
+            dataset.validate()
+        except ValueError as exc:
+            raise MarketHubContractError(
+                f"partial futures replay descriptor is invalid: {exc}"
+            ) from exc
+        return dataset
+
+    @staticmethod
+    def _partial_instruments(products, coverage, series_type):
+        coverage_by_product: dict[str, list[dict[str, Any]]] = {}
+        for item in coverage:
+            coverage_by_product.setdefault(str(item.get("product_code", "")).casefold(), []).append(
+                item
+            )
+        result: list[CanonicalFuturesInstrument] = []
+        for instrument, product in products.items():
+            items = coverage_by_product.get(product.casefold())
+            if not items or not all(
+                item.get("status") == "accepted" and int(item.get("observed_count", 0)) > 0
+                for item in items
+            ):
+                raise MarketHubContractError(
+                    f"partial futures coverage is unusable for {product!r}"
+                )
+            exchange = str(items[0].get("exchange", ""))
+            if not exchange or any(str(item.get("exchange", "")) != exchange for item in items):
+                raise MarketHubContractError(
+                    f"partial futures coverage exchange drifted for {product!r}"
+                )
+            result.append(
+                CanonicalFuturesInstrument(
+                    instrument=instrument,
+                    product_code=product,
+                    exchange=exchange,
+                    series_type=series_type,
+                )
+            )
+        return tuple(sorted(result, key=lambda item: item.instrument))
+
+    def _partial_coverage(self, publication, products, start_date, end_date):
+        lineage: dict[str, Any] | None = None
+        items: list[dict[str, Any]] = []
+        for page, metadata in self._iter_partial_pages(
+            publication,
+            "/api/futures/quotes/1m/partial/coverage",
+            products,
+            start_date,
+            end_date,
+            "coverage",
+        ):
+            if lineage is None:
+                lineage = metadata
+            elif _full_partial_lineage_identity(metadata) != _full_partial_lineage_identity(
+                lineage
+            ):
+                raise MarketHubContractError("partial futures lineage drifted during coverage read")
+            items.extend(page)
+        if lineage is None:
+            raise MarketHubContractError("partial futures coverage returned no pages")
+        return lineage, items
 
     def _iter_partial_futures_pages(self, publication, product, start_date, end_date):
-        cursor = None
         previous: datetime | None = None
-        seen_cursors: set[str] = set()
-        while True:
-            query = self._partial_query(
-                publication, (product,), start_date, end_date, limit=PARTIAL_FUTURES_PAGE_SIZE
-            )
-            if cursor is not None:
-                query["cursor"] = cursor
-            response, headers = self._request_with_headers(
-                "GET", "/api/futures/quotes/1m/partial", query=query
-            )
-            meta, rows = self._validate_partial_response(response, headers, publication, "bars")
+        for rows, meta in self._iter_partial_pages(
+            publication,
+            "/api/futures/quotes/1m/partial",
+            (product,),
+            start_date,
+            end_date,
+            "bars",
+        ):
             for row in rows:
                 timestamp = _parse_futures_time(row.get("bar_time"))
                 if previous is not None and timestamp <= previous:
@@ -456,13 +575,218 @@ class MarketHubClient:
                 previous = timestamp
             if rows:
                 yield tuple(rows), meta
+
+    def _iter_partial_pages(self, publication, path, products, start_date, end_date, kind):
+        cursor = None
+        previous_meta: dict[str, Any] | None = None
+        seen_cursors: set[str] = set()
+        while True:
+            query = self._partial_query(
+                publication, products, start_date, end_date, limit=PARTIAL_FUTURES_PAGE_SIZE
+            )
+            if cursor is not None:
+                query["cursor"] = cursor
+            response, headers = self._request_with_headers("GET", path, query=query)
+            meta, rows = self._validate_partial_response(response, headers, publication, kind)
+            if previous_meta is not None and _full_partial_lineage_identity(
+                meta
+            ) != _full_partial_lineage_identity(previous_meta):
+                raise MarketHubContractError("partial futures lineage drifted during paged read")
+            previous_meta = meta
+            yield tuple(rows), meta
             next_cursor = meta.get("next_cursor")
             if next_cursor is None:
                 return
             if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
                 raise MarketHubContractError("partial futures cursor is invalid or repeated")
+            if not rows:
+                raise MarketHubContractError("partial futures cursor advanced without data")
             seen_cursors.add(next_cursor)
             cursor = next_cursor
+
+    def _partial_lineage(self, publication, metadata):
+        return {
+            "publication": publication.as_dict(),
+            "qmi_id": _require_partial_lineage(metadata, "qmi_id"),
+            "catalog_identity": _require_partial_lineage(metadata, "catalog_identity"),
+            "source_boundary_manifest": _require_partial_lineage(
+                metadata, "source_boundary_manifest"
+            ),
+            "source_manifests": _require_partial_lineage(metadata, "source_manifests"),
+            "lineage_limitations": _require_partial_lineage(metadata, "lineage_limitations"),
+            "missing_bar_semantics": "skip",
+            "session_grid": "not_asserted_complete",
+        }
+
+    def _partial_bar_stream(self, publication, instruments, start_date, end_date, lineage):
+        streams = []
+        for instrument in instruments:
+
+            def rows_for(item=instrument):
+                for rows, metadata in self._iter_partial_futures_pages(
+                    publication, item.product_code, start_date, end_date
+                ):
+                    if _full_partial_lineage_identity(metadata) != _full_partial_lineage_identity(
+                        {**publication.as_dict(), **lineage}
+                    ):
+                        raise MarketHubContractError(
+                            "partial futures full lineage drifted during read"
+                        )
+                    self._validate_partial_rows(rows, item.product_code)
+                    for row in rows:
+                        try:
+                            yield CanonicalFuturesBar.from_markethub(
+                                row,
+                                {item.product_code.casefold(): item},
+                                parse_time=_parse_futures_time,
+                            )
+                        except ValueError as exc:
+                            raise MarketHubContractError(
+                                f"invalid canonical partial futures data: {exc}"
+                            ) from exc
+
+            streams.append(iter(rows_for()))
+        heap = []
+        for index, stream in enumerate(streams):
+            try:
+                bar = next(stream)
+            except StopIteration:
+                continue
+            heappush(heap, (bar.identity, index, bar, stream))
+        previous = None
+        while heap:
+            identity, index, bar, stream = heappop(heap)
+            if previous is not None and identity <= previous:
+                raise MarketHubContractError(
+                    "partial futures global ordering or duplicate violation"
+                )
+            previous = identity
+            yield bar
+            try:
+                following = next(stream)
+            except StopIteration:
+                continue
+            heappush(heap, (following.identity, index, following, stream))
+
+    def _scan_partial_futures(
+        self, publication, instruments, start_date, end_date, lineage, coverage
+    ):
+        metadata = self._partial_metadata(publication, instruments, lineage)
+        digest = sha256()
+        digest.update(b'{"bars":[')
+        counts = {item.instrument: 0 for item in instruments}
+        bounds: dict[str, list[datetime | None]] = {
+            item.instrument: [None, None] for item in instruments
+        }
+        calendar: set[str] = set()
+        for index, bar in enumerate(
+            self._partial_bar_stream(publication, instruments, start_date, end_date, lineage)
+        ):
+            if index:
+                digest.update(b",")
+            digest.update(canonical_json(bar.hash_record()))
+            counts[bar.instrument] += 1
+            bounds[bar.instrument][0] = bounds[bar.instrument][0] or bar.bar_time
+            bounds[bar.instrument][1] = bar.bar_time
+            calendar.add(bar.bar_time.date().isoformat())
+        if any(value == 0 for value in counts.values()):
+            raise MarketHubContractError(
+                "partial futures has no observed rows for a requested instrument"
+            )
+        digest.update(b"],")
+        digest.update(canonical_json(metadata)[1:])
+        normalized_bounds = {
+            key: (value[0], value[1])
+            for key, value in bounds.items()
+            if value[0] is not None and value[1] is not None
+        }
+        expected = _coverage_counts(coverage, instruments)
+        if expected != counts:
+            raise MarketHubContractError(
+                "partial futures coverage/actual row mismatch: "
+                f"expected={expected!r}, actual={counts!r}"
+            )
+        return {
+            "input_hash": digest.hexdigest(),
+            "bar_counts": counts,
+            "instrument_bounds": normalized_bounds,
+            "calendar": tuple(sorted(calendar)),
+            "coverage": tuple(coverage),
+        }
+
+    def _verified_partial_stream(
+        self, publication, instruments, start_date, end_date, lineage, expected
+    ):
+        metadata = self._partial_metadata(publication, instruments, lineage)
+        digest = sha256()
+        digest.update(b'{"bars":[')
+        counts = {item.instrument: 0 for item in instruments}
+        bounds: dict[str, list[datetime | None]] = {
+            item.instrument: [None, None] for item in instruments
+        }
+        calendar: set[str] = set()
+        for index, bar in enumerate(
+            self._partial_bar_stream(publication, instruments, start_date, end_date, lineage)
+        ):
+            if index:
+                digest.update(b",")
+            digest.update(canonical_json(bar.hash_record()))
+            counts[bar.instrument] += 1
+            bounds[bar.instrument][0] = bounds[bar.instrument][0] or bar.bar_time
+            bounds[bar.instrument][1] = bar.bar_time
+            calendar.add(bar.bar_time.date().isoformat())
+            yield bar
+        digest.update(b"],")
+        digest.update(canonical_json(metadata)[1:])
+        observed = {
+            "input_hash": digest.hexdigest(),
+            "bar_counts": counts,
+            "instrument_bounds": {
+                key: (value[0], value[1])
+                for key, value in bounds.items()
+                if value[0] is not None and value[1] is not None
+            },
+            "calendar": tuple(sorted(calendar)),
+        }
+        expected_counts = _coverage_counts(expected["coverage"], instruments)
+        if counts != expected_counts:
+            raise MarketHubContractError("partial futures stream coverage/actual row mismatch")
+        comparison = ("input_hash", "bar_counts", "instrument_bounds")
+        if "calendar" in expected:
+            comparison += ("calendar",)
+        for key in comparison:
+            value = observed[key]
+            if value != expected[key]:
+                raise MarketHubContractError(f"partial futures stream verification drifted: {key}")
+        hashes = expected.get("manifest_hashes", {})
+        actual_hashes = {
+            "catalog_hash": sha256_value(tuple(item.hash_record() for item in instruments)),
+            "calendar_hash": sha256_value(observed["calendar"]),
+            "coverage_hash": sha256_value(
+                tuple(
+                    {
+                        "instrument": instrument.instrument,
+                        "actual_rows": counts[instrument.instrument],
+                        "complete": counts[instrument.instrument] > 0,
+                    }
+                    for instrument in instruments
+                )
+            ),
+        }
+        if any(actual_hashes[key] != value for key, value in hashes.items()):
+            raise MarketHubContractError("partial futures stream manifest verification drifted")
+
+    @staticmethod
+    def _partial_metadata(publication, instruments, lineage):
+        return {
+            "data_version": publication.dataset_id,
+            "dataset_version": publication.dataset_version,
+            "instruments": [item.hash_record() for item in instruments],
+            "partial_lineage": lineage,
+            "schema": "quant-runtime.canonical-futures-1m.v1",
+            "series_type": "back_adjusted_continuous",
+            "timezone": "Asia/Shanghai",
+        }
 
     @staticmethod
     def _partial_query(publication, products, start_date, end_date, *, limit):
@@ -501,7 +825,7 @@ class MarketHubClient:
             "source_manifests",
             "lineage_limitations",
         )
-        if kind == "bars" and any(not meta.get(key) for key in required):
+        if any(not meta.get(key) for key in required):
             raise MarketHubContractError("partial futures lineage is incomplete")
         items = response.get("items")
         if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
@@ -948,6 +1272,89 @@ def _partial_identity(meta: dict[str, Any]) -> tuple[str, str, str, str, str, st
             "catalog_identity",
         )
     )
+
+
+def _full_partial_lineage_identity(meta: dict[str, Any]) -> bytes:
+    """Every page must carry the same frozen publication and lineage evidence."""
+
+    return canonical_json(
+        {
+            key: meta.get(key)
+            for key in (
+                "dataset_id",
+                "dataset_version",
+                "partial_completeness_revision",
+                "generation_pin",
+                "qmi_id",
+                "catalog_identity",
+                "source_boundary_manifest",
+                "source_manifests",
+                "lineage_limitations",
+                "missing_bar_semantics",
+                "session_grid",
+            )
+        }
+    )
+
+
+def _coverage_counts(
+    coverage: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+    instruments: tuple[CanonicalFuturesInstrument, ...],
+) -> dict[str, int]:
+    by_product = {item.product_code.casefold(): item.instrument for item in instruments}
+    result = {item.instrument: 0 for item in instruments}
+    for item in coverage:
+        product = str(item.get("product_code", "")).casefold()
+        try:
+            instrument = by_product[product]
+            count = int(item["observed_count"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MarketHubContractError("partial futures coverage count is invalid") from exc
+        if count <= 0:
+            raise MarketHubContractError("partial futures coverage count is invalid")
+        result[instrument] += count
+    return result
+
+
+def _coverage_bounds(
+    coverage: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+    instruments: tuple[CanonicalFuturesInstrument, ...],
+) -> dict[str, tuple[datetime, datetime]]:
+    by_product = {item.product_code.casefold(): item.instrument for item in instruments}
+    bounds: dict[str, list[datetime | None]] = {
+        item.instrument: [None, None] for item in instruments
+    }
+    for item in coverage:
+        try:
+            instrument = by_product[str(item.get("product_code", "")).casefold()]
+            first = _parse_futures_time(item["start_time"])
+            last = _parse_futures_time(item["end_time"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MarketHubContractError("partial futures coverage bounds are invalid") from exc
+        if first > last:
+            raise MarketHubContractError("partial futures coverage bounds are invalid")
+        current = bounds[instrument]
+        current[0] = first if current[0] is None else min(current[0], first)
+        current[1] = last if current[1] is None else max(current[1], last)
+    if any(first is None or last is None for first, last in bounds.values()):
+        raise MarketHubContractError("partial futures coverage lacks bounds")
+    return {key: (value[0], value[1]) for key, value in bounds.items()}  # type: ignore[return-value]
+
+
+def _coverage_calendar(
+    coverage: tuple[dict[str, Any], ...] | list[dict[str, Any]],
+) -> tuple[str, ...]:
+    values: set[str] = set()
+    for item in coverage:
+        try:
+            first = _parse_futures_time(item["start_time"]).date()
+            last = _parse_futures_time(item["end_time"]).date()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MarketHubContractError("partial futures coverage calendar is invalid") from exc
+        values.update((first.isoformat(), last.isoformat()))
+    if not values:
+        raise MarketHubContractError("partial futures coverage calendar is empty")
+    return tuple(sorted(values))
 
 
 def _require_partial_lineage(value: dict[str, Any] | None, key: str) -> Any:

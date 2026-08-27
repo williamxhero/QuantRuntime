@@ -336,8 +336,12 @@ class FuturesExecutionConfig:
                         f"expected {frozen!r}, got rows={counts[instrument]!r}, "
                         f"bounds={bounds[instrument]!r}"
                     )
-        for bar in dataset.bars:
-            _canonical_trading_day(bar, self.trading_days)
+        # A partial publication is a replayable stream.  Its complete canonical
+        # scan is frozen at snapshot resolution and every streamed bar is checked
+        # in FuturesStrategyContext before Nautilus observes it.
+        if not hasattr(dataset.bars, "verification"):
+            for bar in dataset.bars:
+                _canonical_trading_day(bar, self.trading_days)
 
     @property
     def profile_hash(self) -> str | None:
@@ -392,10 +396,7 @@ class FuturesStrategyContext:
             {
                 (dt_to_unix_nanos(item.bar_time), item.instrument): FuturesSignalBar(
                     bar=item,
-                    trading_day=_canonical_trading_day(
-                        item,
-                        self.execution.trading_days,
-                    ),
+                    trading_day=_canonical_trading_day(item, self.execution.trading_days),
                 )
                 for item in bars
             }

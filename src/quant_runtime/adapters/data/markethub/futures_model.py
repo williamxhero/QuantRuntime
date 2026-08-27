@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
@@ -329,13 +329,38 @@ class CanonicalFuturesBars:
 
 
 @dataclass(frozen=True, slots=True)
+class ReplayablePartialFuturesBars:
+    """A metadata-only, replayable partial-publication stream.
+
+    The resolver performs a bounded full canonical scan before this object is
+    constructed.  Formal execution gets a fresh reader and must consume it to
+    completion; the reader itself raises if the observed bytes differ from the
+    frozen scan.  No raw bars are retained in the reference snapshot.
+    """
+
+    instruments: tuple[str, ...]
+    bar_counts: dict[str, int]
+    trading_dates: tuple[date, ...]
+    instrument_bounds: dict[str, tuple[datetime, datetime]]
+    verified_input_hash: str
+    verification: dict[str, Any]
+    _stream_factory: Callable[[], Iterator[CanonicalFuturesBar]] = field(repr=False, compare=False)
+
+    def __iter__(self) -> Iterator[CanonicalFuturesBar]:
+        return self._stream_factory()
+
+    def __len__(self) -> int:
+        return sum(self.bar_counts.values())
+
+
+@dataclass(frozen=True, slots=True)
 class CanonicalFuturesDataset:
     data_version: str
     dataset_version: str
     timezone: str
     series_type: str
     instruments: tuple[CanonicalFuturesInstrument, ...]
-    bars: tuple[CanonicalFuturesBar, ...] | CanonicalFuturesBars
+    bars: tuple[CanonicalFuturesBar, ...] | CanonicalFuturesBars | ReplayablePartialFuturesBars
     contract_catalog: FuturesContractCatalogIdentity | None = None
     partial_lineage: dict[str, Any] | None = None
     _validated: bool = field(default=False, init=False, repr=False, compare=False)
@@ -364,6 +389,13 @@ class CanonicalFuturesDataset:
         if isinstance(self.bars, CanonicalFuturesBars):
             if set(self.bars.instruments) != instruments:
                 raise ValueError("compact futures bars do not match the instrument catalog")
+        elif isinstance(self.bars, ReplayablePartialFuturesBars):
+            if tuple(item.instrument for item in self.instruments) != self.bars.instruments:
+                raise ValueError(
+                    "partial futures replay stream does not match the instrument catalog"
+                )
+            if not self.bars.verified_input_hash:
+                raise ValueError("partial futures replay stream lacks canonical verification")
         else:
             if not _strictly_increasing(item.identity for item in self.bars):
                 raise ValueError("futures bars are duplicated or out of canonical order")
@@ -378,6 +410,9 @@ class CanonicalFuturesDataset:
         if self._input_hash is not None:
             return self._input_hash
         self.validate()
+        if isinstance(self.bars, ReplayablePartialFuturesBars):
+            object.__setattr__(self, "_input_hash", self.bars.verified_input_hash)
+            return self.bars.verified_input_hash
         metadata = {
             "data_version": self.data_version,
             "dataset_version": self.dataset_version,
@@ -419,7 +454,7 @@ class CanonicalFuturesDataset:
 
     @property
     def bar_counts(self) -> dict[str, int]:
-        if isinstance(self.bars, CanonicalFuturesBars):
+        if isinstance(self.bars, CanonicalFuturesBars | ReplayablePartialFuturesBars):
             return self.bars.bar_counts
         return {
             instrument.instrument: sum(
@@ -430,13 +465,13 @@ class CanonicalFuturesDataset:
 
     @property
     def trading_dates(self) -> tuple[date, ...]:
-        if isinstance(self.bars, CanonicalFuturesBars):
+        if isinstance(self.bars, CanonicalFuturesBars | ReplayablePartialFuturesBars):
             return self.bars.trading_dates
         return tuple(sorted({item.bar_time.date() for item in self.bars}))
 
     @property
     def instrument_bounds(self) -> dict[str, tuple[datetime, datetime]]:
-        if isinstance(self.bars, CanonicalFuturesBars):
+        if isinstance(self.bars, CanonicalFuturesBars | ReplayablePartialFuturesBars):
             return self.bars.instrument_bounds
         return {
             instrument.instrument: (

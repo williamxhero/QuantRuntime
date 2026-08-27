@@ -104,8 +104,24 @@ class MarketHubDataAdapter:
             expected_revision = manifest["source"].get("data_revision")
             if not isinstance(expected_revision, str) or not expected_revision:
                 raise MarketHubContractError("reference snapshot lacks a frozen data revision")
-            verification = self.read(request, expected_revision=expected_revision)
             declared = manifest.get("verification")
+            if request.partial_publication is not None:
+                if not isinstance(declared, dict):
+                    raise MarketHubContractError("partial reference snapshot lacks verification")
+                dataset = self._client_factory(request).open_partial_futures_stream(
+                    request.instruments,
+                    request.start,
+                    request.end,
+                    series_type=str(request.contract_mapping),
+                    publication=request.partial_publication,
+                    verification=declared,
+                )
+                if dataset.reference_revision != expected_revision:
+                    raise MarketHubContractError(
+                        "partial reference snapshot lineage drifted before read"
+                    )
+                return ResolvedSnapshot(manifest, manifest_path, dataset)
+            verification = self.read(request, expected_revision=expected_revision)
             if declared is not None and declared != verification.manifest_value:
                 raise MarketHubContractError("reference snapshot verification drifted")
             return ResolvedSnapshot(manifest, manifest_path, verification.dataset)

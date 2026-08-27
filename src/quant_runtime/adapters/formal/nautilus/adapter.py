@@ -70,6 +70,9 @@ class NautilusWorkspaceAdapter:
         partial_lineage = value.output / "partial_snapshot_lineage.json"
         if partial_lineage.exists():
             paths.append(partial_lineage)
+        partial_stream_verification = value.output / "partial_stream_verification.json"
+        if partial_stream_verification.exists():
+            paths.append(partial_stream_verification)
         evidence = tuple(artifact_records(value.output, paths))
         return FormalAdapterResult(
             formal_id=formal_id,

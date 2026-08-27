@@ -23,6 +23,7 @@ from nautilus_trader.model.objects import Money, Price, Quantity
 from quant_runtime.adapters.data.markethub.futures_model import (
     CanonicalFuturesBar,
     CanonicalFuturesDataset,
+    ReplayablePartialFuturesBars,
 )
 from quant_runtime.artifacts import normalize_decimal, write_json
 
@@ -159,6 +160,16 @@ def run_futures_engine(
         if dataset.partial_lineage is not None:
             statistics["partial_snapshot_lineage"] = dataset.partial_lineage
             write_json(output / "partial_snapshot_lineage.json", dataset.partial_lineage)
+        if isinstance(dataset.bars, ReplayablePartialFuturesBars):
+            stream_verification = {
+                **_json_stream_verification(dataset.bars.verification),
+                "phase": "formal_stream_completed",
+                "canonical_input_hash": dataset.input_hash,
+                "streaming_chunks": streaming_chunks,
+                "streamed_native_events": streamed_native_events,
+            }
+            statistics["partial_stream_verification"] = stream_verification
+            write_json(output / "partial_stream_verification.json", stream_verification)
         write_json(output / "native_statistics.json", statistics)
         formal = FormalOutput(
             framework_version=nautilus_trader.__version__,
@@ -202,6 +213,11 @@ def run_futures_engine(
                     else None
                 ),
                 "partial_snapshot": dataset.partial_lineage,
+                "partial_stream_verification": (
+                    _json_stream_verification(dataset.bars.verification)
+                    if isinstance(dataset.bars, ReplayablePartialFuturesBars)
+                    else None
+                ),
             },
         )
         write_normalized_output(output, formal)
@@ -341,6 +357,17 @@ def _strategy_records(strategy: Any, name: str) -> list[dict[str, Any]]:
     if not isinstance(value, list | tuple) or any(not isinstance(item, dict) for item in value):
         raise ValueError(f"futures strategy {name} must be a list of objects")
     return list(value)
+
+
+def _json_stream_verification(value: dict[str, Any]) -> dict[str, Any]:
+    result = dict(value)
+    bounds = result.get("instrument_bounds")
+    if isinstance(bounds, dict):
+        result["instrument_bounds"] = {
+            instrument: [first.isoformat(), last.isoformat()]
+            for instrument, (first, last) in bounds.items()
+        }
+    return result
 
 
 def _commission_action(order, spec: FuturesContractSpec) -> str:
