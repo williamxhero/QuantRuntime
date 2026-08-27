@@ -378,9 +378,8 @@ class MarketHubClient:
                 )
             )
         ordered = tuple(sorted(native_instruments, key=lambda item: item.instrument))
-        lineage = self._partial_lineage(publication, coverage_meta)
-        scan = self._scan_partial_futures(
-            publication, ordered, start_date, end_date, lineage, coverage
+        scan, lineage = self._scan_partial_futures(
+            publication, ordered, start_date, end_date, coverage_meta, coverage
         )
         verification = {
             "schema": "quant-runtime.partial-futures-stream-verification.v1",
@@ -410,6 +409,7 @@ class MarketHubClient:
                     ordered,
                     start_date,
                     end_date,
+                    coverage_meta,
                     lineage,
                     scan,
                 ),
@@ -433,6 +433,7 @@ class MarketHubClient:
         series_type: str,
         publication: PartialFuturesPublication,
         verification: dict[str, Any],
+        expected_revision: str,
     ) -> CanonicalFuturesDataset:
         """Open a previously scanned partial reference without re-reading bars.
 
@@ -449,7 +450,9 @@ class MarketHubClient:
         coverage_meta, coverage = self._partial_coverage(
             publication, tuple(products.values()), start_date, end_date
         )
-        lineage = self._partial_lineage(publication, coverage_meta)
+        lineage = _revision_lineage(publication, expected_revision)
+        if lineage["catalog_identity"] != str(coverage_meta.get("catalog_identity", "")):
+            raise MarketHubContractError("partial futures coverage catalog drifted before stream")
         native = self._partial_instruments(products, coverage, series_type)
         expected_counts = _coverage_counts(coverage, native)
         bounds = _coverage_bounds(coverage, native)
@@ -489,7 +492,7 @@ class MarketHubClient:
                 verified_input_hash=verification["canonical_input_hash"],
                 verification=descriptor,
                 _stream_factory=lambda: self._verified_partial_stream(
-                    publication, native, start_date, end_date, lineage, expected
+                    publication, native, start_date, end_date, coverage_meta, lineage, expected
                 ),
             ),
             partial_lineage=lineage,
@@ -547,9 +550,7 @@ class MarketHubClient:
         ):
             if lineage is None:
                 lineage = metadata
-            elif _full_partial_lineage_identity(metadata) != _full_partial_lineage_identity(
-                lineage
-            ):
+            elif _coverage_identity(metadata) != _coverage_identity(lineage):
                 raise MarketHubContractError("partial futures lineage drifted during coverage read")
             items.extend(page)
         if lineage is None:
@@ -588,9 +589,8 @@ class MarketHubClient:
                 query["cursor"] = cursor
             response, headers = self._request_with_headers("GET", path, query=query)
             meta, rows = self._validate_partial_response(response, headers, publication, kind)
-            if previous_meta is not None and _full_partial_lineage_identity(
-                meta
-            ) != _full_partial_lineage_identity(previous_meta):
+            identity = _coverage_identity if kind == "coverage" else _full_partial_lineage_identity
+            if previous_meta is not None and identity(meta) != identity(previous_meta):
                 raise MarketHubContractError("partial futures lineage drifted during paged read")
             previous_meta = meta
             yield tuple(rows), meta
@@ -618,7 +618,15 @@ class MarketHubClient:
             "session_grid": "not_asserted_complete",
         }
 
-    def _partial_bar_stream(self, publication, instruments, start_date, end_date, lineage):
+    def _partial_bar_stream(
+        self,
+        publication,
+        instruments,
+        start_date,
+        end_date,
+        coverage_meta,
+        lineage_state,
+    ):
         streams = []
         for instrument in instruments:
 
@@ -626,6 +634,23 @@ class MarketHubClient:
                 for rows, metadata in self._iter_partial_futures_pages(
                     publication, item.product_code, start_date, end_date
                 ):
+                    if str(metadata.get("catalog_identity", "")) != str(
+                        coverage_meta.get("catalog_identity", "")
+                    ):
+                        raise MarketHubContractError(
+                            "partial futures coverage/catalog lineage drifted during read"
+                        )
+                    lineage = lineage_state.get("value")
+                    if lineage is None:
+                        expected = lineage_state.get("expected")
+                        if expected is not None and _partial_identity(
+                            metadata
+                        ) != _partial_identity({**publication.as_dict(), **expected}):
+                            raise MarketHubContractError(
+                                "partial futures frozen qmi/catalog lineage drifted during read"
+                            )
+                        lineage = self._partial_lineage(publication, metadata)
+                        lineage_state["value"] = lineage
                     if _full_partial_lineage_identity(metadata) != _full_partial_lineage_identity(
                         {**publication.as_dict(), **lineage}
                     ):
@@ -669,9 +694,9 @@ class MarketHubClient:
             heappush(heap, (following.identity, index, following, stream))
 
     def _scan_partial_futures(
-        self, publication, instruments, start_date, end_date, lineage, coverage
+        self, publication, instruments, start_date, end_date, coverage_meta, coverage
     ):
-        metadata = self._partial_metadata(publication, instruments, lineage)
+        lineage_state: dict[str, dict[str, Any] | None] = {"value": None}
         digest = sha256()
         digest.update(b'{"bars":[')
         counts = {item.instrument: 0 for item in instruments}
@@ -680,7 +705,14 @@ class MarketHubClient:
         }
         calendar: set[str] = set()
         for index, bar in enumerate(
-            self._partial_bar_stream(publication, instruments, start_date, end_date, lineage)
+            self._partial_bar_stream(
+                publication,
+                instruments,
+                start_date,
+                end_date,
+                coverage_meta,
+                lineage_state,
+            )
         ):
             if index:
                 digest.update(b",")
@@ -693,6 +725,10 @@ class MarketHubClient:
             raise MarketHubContractError(
                 "partial futures has no observed rows for a requested instrument"
             )
+        lineage = lineage_state["value"]
+        if lineage is None:
+            raise MarketHubContractError("partial futures bars did not provide full lineage")
+        metadata = self._partial_metadata(publication, instruments, lineage)
         digest.update(b"],")
         digest.update(canonical_json(metadata)[1:])
         normalized_bounds = {
@@ -706,18 +742,24 @@ class MarketHubClient:
                 "partial futures coverage/actual row mismatch: "
                 f"expected={expected!r}, actual={counts!r}"
             )
-        return {
-            "input_hash": digest.hexdigest(),
-            "bar_counts": counts,
-            "instrument_bounds": normalized_bounds,
-            "calendar": tuple(sorted(calendar)),
-            "coverage": tuple(coverage),
-        }
+        return (
+            {
+                "input_hash": digest.hexdigest(),
+                "bar_counts": counts,
+                "instrument_bounds": normalized_bounds,
+                "calendar": tuple(sorted(calendar)),
+                "coverage": tuple(coverage),
+            },
+            lineage,
+        )
 
     def _verified_partial_stream(
-        self, publication, instruments, start_date, end_date, lineage, expected
+        self, publication, instruments, start_date, end_date, coverage_meta, lineage, expected
     ):
-        metadata = self._partial_metadata(publication, instruments, lineage)
+        lineage_state: dict[str, dict[str, Any] | None] = {
+            "value": None,
+            "expected": lineage,
+        }
         digest = sha256()
         digest.update(b'{"bars":[')
         counts = {item.instrument: 0 for item in instruments}
@@ -726,7 +768,14 @@ class MarketHubClient:
         }
         calendar: set[str] = set()
         for index, bar in enumerate(
-            self._partial_bar_stream(publication, instruments, start_date, end_date, lineage)
+            self._partial_bar_stream(
+                publication,
+                instruments,
+                start_date,
+                end_date,
+                coverage_meta,
+                lineage_state,
+            )
         ):
             if index:
                 digest.update(b",")
@@ -736,6 +785,12 @@ class MarketHubClient:
             bounds[bar.instrument][1] = bar.bar_time
             calendar.add(bar.bar_time.date().isoformat())
             yield bar
+        actual_lineage = lineage_state["value"]
+        if actual_lineage is None:
+            raise MarketHubContractError("partial futures stream ended without full lineage")
+        lineage.clear()
+        lineage.update(actual_lineage)
+        metadata = self._partial_metadata(publication, instruments, lineage)
         digest.update(b"],")
         digest.update(canonical_json(metadata)[1:])
         observed = {
@@ -806,8 +861,25 @@ class MarketHubClient:
             raise MarketHubContractError("partial futures contract is not satisfied")
         if meta.get("missing_bar_semantics") != "skip":
             raise MarketHubContractError("partial futures missing-bar semantics drifted")
-        if kind == "bars" and meta.get("session_grid") != "not_asserted_complete":
-            raise MarketHubContractError("partial futures session grid drifted")
+        if kind == "coverage":
+            if meta.get("coverage_semantics") != "observed_admitted_runs_only":
+                raise MarketHubContractError("partial futures coverage semantics drifted")
+            if meta.get("residual_semantics") != "excluded_or_missing_rows_are_skipped":
+                raise MarketHubContractError("partial futures residual semantics drifted")
+            if not isinstance(meta.get("warmup"), dict):
+                raise MarketHubContractError("partial futures coverage warmup is invalid")
+        else:
+            if meta.get("session_grid") != "not_asserted_complete":
+                raise MarketHubContractError("partial futures session grid drifted")
+            coverage = meta.get("coverage")
+            if (
+                not isinstance(coverage, dict)
+                or coverage.get("endpoint") != "/api/futures/quotes/1m/partial/coverage"
+                or coverage.get("semantics") != "observed_admitted_runs_only"
+                or coverage.get("residual_semantics") != "excluded_or_missing_rows_are_skipped"
+                or not isinstance(meta.get("warmup"), dict)
+            ):
+                raise MarketHubContractError("partial futures bars coverage semantics drifted")
         for key, expected in publication.as_dict().items():
             if str(meta.get(key, "")) != expected:
                 raise MarketHubContractError(f"partial futures {key} mismatch")
@@ -818,14 +890,15 @@ class MarketHubClient:
         }.items():
             if headers.get(header, "") != expected:
                 raise MarketHubContractError(f"partial futures header {header} mismatch")
+        if not meta.get("catalog_identity"):
+            raise MarketHubContractError("partial futures catalog lineage is incomplete")
         required = (
             "qmi_id",
-            "catalog_identity",
             "source_boundary_manifest",
             "source_manifests",
             "lineage_limitations",
         )
-        if any(not meta.get(key) for key in required):
+        if kind == "bars" and any(not meta.get(key) for key in required):
             raise MarketHubContractError("partial futures lineage is incomplete")
         items = response.get("items")
         if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
@@ -1272,6 +1345,47 @@ def _partial_identity(meta: dict[str, Any]) -> tuple[str, str, str, str, str, st
             "catalog_identity",
         )
     )
+
+
+def _coverage_identity(meta: dict[str, Any]) -> bytes:
+    return canonical_json(
+        {
+            key: meta.get(key)
+            for key in (
+                "dataset_id",
+                "dataset_version",
+                "partial_completeness_revision",
+                "generation_pin",
+                "catalog_identity",
+                "partial_contract_satisfied",
+                "missing_bar_semantics",
+                "coverage_semantics",
+                "residual_semantics",
+                "warmup",
+            )
+        }
+    )
+
+
+def _revision_lineage(publication: PartialFuturesPublication, revision: str) -> dict[str, Any]:
+    prefix = (
+        f"{publication.dataset_id}:{publication.dataset_version};"
+        f"partial_completeness:{publication.partial_completeness_revision};"
+        f"generation_pin:{publication.generation_pin};qmi:"
+    )
+    suffix = ";catalog:"
+    if not revision.startswith(prefix) or suffix not in revision:
+        raise MarketHubContractError("partial futures reference revision is malformed")
+    qmi_id, catalog_identity = revision[len(prefix) :].split(suffix, maxsplit=1)
+    if not qmi_id or not catalog_identity:
+        raise MarketHubContractError("partial futures reference revision lacks qmi/catalog lineage")
+    return {
+        "publication": publication.as_dict(),
+        "qmi_id": qmi_id,
+        "catalog_identity": catalog_identity,
+        "missing_bar_semantics": "skip",
+        "session_grid": "not_asserted_complete",
+    }
 
 
 def _full_partial_lineage_identity(meta: dict[str, Any]) -> bytes:

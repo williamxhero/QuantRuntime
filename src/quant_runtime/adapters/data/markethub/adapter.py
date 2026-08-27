@@ -115,6 +115,7 @@ class MarketHubDataAdapter:
                     series_type=str(request.contract_mapping),
                     publication=request.partial_publication,
                     verification=declared,
+                    expected_revision=expected_revision,
                 )
                 if dataset.reference_revision != expected_revision:
                     raise MarketHubContractError(

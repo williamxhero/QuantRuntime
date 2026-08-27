@@ -142,6 +142,9 @@ class PartialFuturesTransport:
         empty_cursor: bool = False,
         lineage_drift_after_scan: bool = False,
         coverage_count_delta: int = 0,
+        coverage_catalog_drift: bool = False,
+        coverage_semantics_drift: bool = False,
+        missing_bars_lineage: bool = False,
     ) -> None:
         self.paths: list[str] = []
         self.repeated_cursor = repeated_cursor
@@ -149,6 +152,9 @@ class PartialFuturesTransport:
         self.empty_cursor = empty_cursor
         self.lineage_drift_after_scan = lineage_drift_after_scan
         self.coverage_count_delta = coverage_count_delta
+        self.coverage_catalog_drift = coverage_catalog_drift
+        self.coverage_semantics_drift = coverage_semantics_drift
+        self.missing_bars_lineage = missing_bars_lineage
         self.bar_reads = 0
         self.coverage_reads = 0
 
@@ -161,18 +167,24 @@ class PartialFuturesTransport:
         assert query["codes"] == "ag"
         meta = {
             **self.publication,
-            "qmi_id": "qmi-v1-fixture",
             "catalog_identity": "qmf-catalog-v1-fixture",
-            "source_boundary_manifest": {"count": 1, "sha256": "a" * 64},
-            "source_manifests": [{"source_key": "fixture", "lineage": "observed"}],
-            "lineage_limitations": "fixture partial data is not session complete",
             "missing_bar_semantics": "skip",
-            "session_grid": "not_asserted_complete",
+            "warmup": {"residual_semantics": "excluded_or_missing_rows_are_skipped"},
             "partial_contract_satisfied": True,
             "next_cursor": None,
         }
         if path.endswith("/coverage"):
             self.coverage_reads += 1
+            meta.update(
+                {
+                    "coverage_semantics": "observed_admitted_runs_only",
+                    "residual_semantics": "excluded_or_missing_rows_are_skipped",
+                }
+            )
+            if self.coverage_catalog_drift and self.coverage_reads > 1:
+                meta["catalog_identity"] = "qmf-catalog-v1-drifted"
+            if self.coverage_semantics_drift and self.coverage_reads > 1:
+                meta["coverage_semantics"] = "drifted"
             if self.paged and "cursor" not in query:
                 assert "cursor" not in query
                 meta["next_cursor"] = "coverage-page-2"
@@ -197,6 +209,22 @@ class PartialFuturesTransport:
             }
         elif path.endswith("/partial"):
             self.bar_reads += 1
+            meta.update(
+                {
+                    "qmi_id": "qmi-v1-fixture",
+                    "source_boundary_manifest": {"count": 1, "sha256": "a" * 64},
+                    "source_manifests": [{"source_key": "fixture", "lineage": "observed"}],
+                    "lineage_limitations": "fixture partial data is not session complete",
+                    "session_grid": "not_asserted_complete",
+                    "coverage": {
+                        "endpoint": "/api/futures/quotes/1m/partial/coverage",
+                        "semantics": "observed_admitted_runs_only",
+                        "residual_semantics": "excluded_or_missing_rows_are_skipped",
+                    },
+                }
+            )
+            if self.missing_bars_lineage:
+                del meta["source_manifests"]
             if self.lineage_drift_after_scan and self.bar_reads > (2 if self.paged else 1):
                 meta["qmi_id"] = "qmi-v1-drifted"
             if self.paged and "cursor" not in query:
@@ -638,6 +666,27 @@ def test_partial_snapshot_open_preflights_without_replaying_bars(tmp_path: Path)
 @pytest.mark.parametrize("kwargs", [{"empty_cursor": True}, {"coverage_count_delta": 1}])
 def test_partial_futures_fails_closed_on_bad_cursor_or_coverage(kwargs: dict) -> None:
     with pytest.raises(MarketHubContractError):
+        MarketHubClient(transport=PartialFuturesTransport(**kwargs)).fetch_partial_futures_dataset(
+            ("agL0",),
+            date(2025, 1, 2),
+            date(2025, 1, 2),
+            series_type="back_adjusted_continuous",
+            publication=SnapshotRequest.from_manifest(partial_snapshot()).partial_publication,
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs, match",
+    [
+        ({"coverage_catalog_drift": True, "paged": True}, "lineage drifted"),
+        ({"coverage_semantics_drift": True, "paged": True}, "coverage semantics drifted"),
+        ({"missing_bars_lineage": True}, "lineage is incomplete"),
+    ],
+)
+def test_partial_futures_fails_closed_on_coverage_or_bars_lineage_drift(
+    kwargs: dict, match: str
+) -> None:
+    with pytest.raises(MarketHubContractError, match=match):
         MarketHubClient(transport=PartialFuturesTransport(**kwargs)).fetch_partial_futures_dataset(
             ("agL0",),
             date(2025, 1, 2),
