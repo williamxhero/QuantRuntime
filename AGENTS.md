@@ -18,6 +18,8 @@
   explicit Workspace retry, which creates a new attempt without changing the request.
 - Keep strategy implementations in registered Strategy Packages. Test-only packages may live under
   `tests/fixtures`, but this repository must not own a canonical research strategy.
+- Treat `README.md` as frozen. Keep its current content unchanged and place future deployment or
+  research guidance in `AIREADME.md` or the relevant document under `docs/`.
 - Run `uv run ruff format --check .`, `uv run ruff check .`, `uv run pytest -m "not connected"`,
   `uv build`, and `git diff --check` before committing. Run connected tests separately and report
   MarketHub blockers honestly.
