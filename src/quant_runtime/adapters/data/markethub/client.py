@@ -544,19 +544,22 @@ class MarketHubClient:
     def _partial_coverage(self, publication, products, start_date, end_date):
         lineage: dict[str, Any] | None = None
         items: list[dict[str, Any]] = []
-        for page, metadata in self._iter_partial_pages(
-            publication,
-            "/api/futures/quotes/1m/partial/coverage",
-            products,
-            start_date,
-            end_date,
-            "coverage",
-        ):
-            if lineage is None:
-                lineage = metadata
-            elif _coverage_identity(metadata) != _coverage_identity(lineage):
-                raise MarketHubContractError("partial futures lineage drifted during coverage read")
-            items.extend(page)
+        for product in products:
+            for page, metadata in self._iter_partial_pages(
+                publication,
+                "/api/futures/quotes/1m/partial/coverage",
+                (product,),
+                start_date,
+                end_date,
+                "coverage",
+            ):
+                if lineage is None:
+                    lineage = metadata
+                elif _coverage_identity(metadata) != _coverage_identity(lineage):
+                    raise MarketHubContractError(
+                        "partial futures lineage drifted during coverage read"
+                    )
+                items.extend(page)
         if lineage is None:
             raise MarketHubContractError("partial futures coverage returned no pages")
         return lineage, items

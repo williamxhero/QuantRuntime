@@ -278,6 +278,54 @@ class PartialFuturesTransport:
         return deepcopy(value), len(payload), 0.001, headers
 
 
+class ProductPartitionedCoverageTransport:
+    publication = PartialFuturesTransport.publication
+
+    def __init__(self) -> None:
+        self.coverage_codes: list[str] = []
+
+    def request_json_with_headers(self, method, path, *, query=None, body=None):
+        del body
+        assert method == "GET"
+        assert path == "/api/futures/quotes/1m/partial/coverage"
+        assert query is not None
+        code = str(query["codes"])
+        self.coverage_codes.append(code)
+        assert "," not in code, "production partial coverage times out for combined products"
+        exchange = "SHFE" if code == "ag" else "DCE"
+        value = {
+            "items": [
+                {
+                    "product_code": code,
+                    "exchange": exchange,
+                    "start_time": "2025-01-02 09:01:00",
+                    "end_time": "2025-01-02 09:03:00",
+                    "status": "accepted",
+                    "observed_count": 3,
+                }
+            ],
+            "meta": {
+                **self.publication,
+                "catalog_identity": "qmf-catalog-v1-fixture",
+                "missing_bar_semantics": "skip",
+                "warmup": {"residual_semantics": "excluded_or_missing_rows_are_skipped"},
+                "partial_contract_satisfied": True,
+                "coverage_semantics": "observed_admitted_runs_only",
+                "residual_semantics": "excluded_or_missing_rows_are_skipped",
+                "next_cursor": None,
+            },
+        }
+        headers = {
+            "x-markethub-dataset-version": self.publication["dataset_version"],
+            "x-markethub-partial-completeness-revision": self.publication[
+                "partial_completeness_revision"
+            ],
+            "x-markethub-generation-pin": self.publication["generation_pin"],
+        }
+        payload = json.dumps(value).encode()
+        return deepcopy(value), len(payload), 0.001, headers
+
+
 def snapshot(*, catalog_bound: bool = False) -> dict:
     return {
         "schema": "quant-research.market-snapshot-ref.v1",
@@ -642,6 +690,31 @@ def test_partial_futures_paginates_coverage_and_preserves_stream_hash() -> None:
     )
     assert dataset.input_hash == expanded.input_hash
     assert dataset.bar_counts == {"agL0": 3}
+
+
+def test_partial_futures_partitions_multi_product_coverage_queries() -> None:
+    transport = ProductPartitionedCoverageTransport()
+    publication = SnapshotRequest.from_manifest(partial_snapshot()).partial_publication
+    assert publication is not None
+    revision = (
+        f"{publication.dataset_id}:{publication.dataset_version};"
+        f"partial_completeness:{publication.partial_completeness_revision};"
+        f"generation_pin:{publication.generation_pin};"
+        "qmi:qmi-v1-fixture;catalog:qmf-catalog-v1-fixture"
+    )
+
+    dataset = MarketHubClient(transport=transport).open_partial_futures_stream(
+        ("agL0", "iL0"),
+        date(2025, 1, 2),
+        date(2025, 1, 2),
+        series_type="back_adjusted_continuous",
+        publication=publication,
+        verification={"canonical_input_hash": "a" * 64},
+        expected_revision=revision,
+    )
+
+    assert transport.coverage_codes == ["ag", "i"]
+    assert tuple(item.instrument for item in dataset.instruments) == ("agL0", "iL0")
 
 
 def test_partial_snapshot_open_preflights_without_replaying_bars(tmp_path: Path) -> None:
