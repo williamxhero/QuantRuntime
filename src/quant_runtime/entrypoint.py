@@ -10,9 +10,10 @@ def load_package_entrypoint(package_root: Path, entrypoint: str) -> Any:
     relative, separator, attribute = entrypoint.partition(":")
     if not separator or not attribute:
         raise ValueError(f"entrypoint must use relative/path.py:attribute syntax: {entrypoint!r}")
-    source = (package_root / relative).resolve()
+    resolved_package_root = package_root.resolve()
+    source = (resolved_package_root / relative).resolve()
     try:
-        source.relative_to(package_root)
+        source.relative_to(resolved_package_root)
     except ValueError as exc:
         raise ValueError(f"entrypoint escapes package root: {entrypoint!r}") from exc
     if not source.is_file():
