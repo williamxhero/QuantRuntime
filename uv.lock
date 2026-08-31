@@ -2733,6 +2733,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "referencing", specifier = ">=0.35" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
+    { name = "tzdata", marker = "extra == 'dev'", specifier = ">=2025.2" },
 ]
 provides-extras = ["dev"]
 
