@@ -16,7 +16,7 @@ def test_production_registry_has_only_real_adapters_and_no_apex_import() -> None
     assert registry.names("discovery") == ("qlib",)
     assert registry.names("formal") == ("nautilus",)
     nautilus = registry.profile("formal", "nautilus")
-    assert nautilus.adapter_version == "1.1.0"
+    assert nautilus.adapter_version == "1.1.1"
     assert "evidence.nautilus_reporting_input" in nautilus.capabilities
     files = [ROOT / "pyproject.toml", *sorted((ROOT / "src").rglob("*.py"))]
     forbidden = ("apex_research", "apex-research", "apextrade", "leanadapter", "lean_adapter")

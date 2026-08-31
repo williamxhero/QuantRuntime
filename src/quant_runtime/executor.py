@@ -19,7 +19,7 @@ from quant_runtime.comparison import compare_results
 from quant_runtime.package import StrategyPackage
 from quant_runtime.registry import production_registry
 
-WORKER_ID = "quant-runtime/0.2.2"
+WORKER_ID = "quant-runtime/0.2.3"
 
 
 class WorkspaceClientPort(Protocol):

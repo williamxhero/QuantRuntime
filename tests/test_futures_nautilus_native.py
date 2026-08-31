@@ -724,7 +724,15 @@ def test_partial_futures_snapshot_uses_only_public_partial_contract_and_preserve
         decision_intents=frozenset({"order"}),
     )
 
-    assert result.metrics["partial_snapshot"]["qmi_id"] == "qmi-v1-fixture"
+    assert all(
+        value is None or isinstance(value, str | int | float | bool)
+        for value in result.metrics.values()
+    )
+    assert result.metrics["partial_snapshot_qmi_id"] == "qmi-v1-fixture"
+    assert result.metrics["partial_snapshot_catalog_identity"] == "qmf-catalog-v1-fixture"
+    assert result.metrics["partial_snapshot_missing_bar_semantics"] == "skip"
+    assert result.metrics["partial_stream_verified"] is True
+    assert result.metrics["partial_stream_canonical_input_hash"] == verification.dataset.input_hash
     lineage = json.loads((output / "partial_snapshot_lineage.json").read_text())
     assert lineage["missing_bar_semantics"] == "skip"
     statistics = json.loads((output / "native_statistics.json").read_text())

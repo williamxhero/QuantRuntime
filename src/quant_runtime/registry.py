@@ -35,7 +35,7 @@ def production_registry() -> AdapterRegistry:
                 "schema": "quant-research.runtime-capability.v1",
                 "backend_id": "nautilus",
                 "role": "formal",
-                "adapter_version": "1.1.0",
+                "adapter_version": "1.1.1",
                 "engine_version": nautilus_trader.__version__,
                 "provides": [
                     "data.bar.1d",

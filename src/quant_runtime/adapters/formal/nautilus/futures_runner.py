@@ -212,9 +212,26 @@ def run_futures_engine(
                     if dataset.contract_catalog is not None
                     else None
                 ),
-                "partial_snapshot": dataset.partial_lineage,
-                "partial_stream_verification": (
-                    _json_stream_verification(dataset.bars.verification)
+                "partial_snapshot_qmi_id": (
+                    dataset.partial_lineage.get("qmi_id")
+                    if dataset.partial_lineage is not None
+                    else None
+                ),
+                "partial_snapshot_catalog_identity": (
+                    dataset.partial_lineage.get("catalog_identity")
+                    if dataset.partial_lineage is not None
+                    else None
+                ),
+                "partial_snapshot_missing_bar_semantics": (
+                    dataset.partial_lineage.get("missing_bar_semantics")
+                    if dataset.partial_lineage is not None
+                    else None
+                ),
+                "partial_stream_verified": isinstance(
+                    dataset.bars, ReplayablePartialFuturesBars
+                ),
+                "partial_stream_canonical_input_hash": (
+                    dataset.bars.verification.get("canonical_input_hash")
                     if isinstance(dataset.bars, ReplayablePartialFuturesBars)
                     else None
                 ),

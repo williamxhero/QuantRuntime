@@ -19,7 +19,7 @@ from quant_runtime.adapters.interface import FormalAdapterResult, FormalRunInput
 from quant_runtime.artifacts import artifact_records
 from quant_runtime.entrypoint import load_package_entrypoint
 
-ADAPTER_VERSION = "1.1.0"
+ADAPTER_VERSION = "1.1.1"
 
 
 class NautilusWorkspaceAdapter:
