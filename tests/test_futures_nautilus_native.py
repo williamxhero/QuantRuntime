@@ -326,6 +326,87 @@ class ProductPartitionedCoverageTransport:
         return deepcopy(value), len(payload), 0.001, headers
 
 
+class MultiProductPartialTransport:
+    publication = PartialFuturesTransport.publication
+
+    def request_json_with_headers(self, method, path, *, query=None, body=None):
+        del body
+        assert method == "GET"
+        assert query is not None
+        code = str(query["codes"])
+        assert code in {"ag", "i"}
+        exchange = "SHFE" if code == "ag" else "DCE"
+        meta = {
+            **self.publication,
+            "catalog_identity": "qmf-catalog-v1-fixture",
+            "missing_bar_semantics": "skip",
+            "warmup": {"residual_semantics": "excluded_or_missing_rows_are_skipped"},
+            "partial_contract_satisfied": True,
+            "next_cursor": None,
+        }
+        if path.endswith("/coverage"):
+            meta.update(
+                {
+                    "coverage_semantics": "observed_admitted_runs_only",
+                    "residual_semantics": "excluded_or_missing_rows_are_skipped",
+                }
+            )
+            items = [
+                {
+                    "product_code": code,
+                    "exchange": exchange,
+                    "start_time": "2025-01-02 09:01:00",
+                    "end_time": "2025-01-02 09:01:00",
+                    "status": "accepted",
+                    "observed_count": 1,
+                }
+            ]
+        elif path.endswith("/partial"):
+            meta.update(
+                {
+                    "qmi_id": "qmi-v1-fixture",
+                    "source_boundary_manifest": {"count": 1, "sha256": "a" * 64},
+                    "source_manifests": [{"source_key": "fixture", "lineage": "observed"}],
+                    "lineage_limitations": "fixture partial data is not session complete",
+                    "session_grid": "not_asserted_complete",
+                    "coverage": {
+                        "endpoint": "/api/futures/quotes/1m/partial/coverage",
+                        "semantics": "observed_admitted_runs_only",
+                        "residual_semantics": "excluded_or_missing_rows_are_skipped",
+                    },
+                }
+            )
+            items = [
+                {
+                    "product_code": code,
+                    "exchange": exchange,
+                    "series_type": "back_adjusted_continuous",
+                    "bar_time": "2025-01-02 09:01:00",
+                    "open": "100",
+                    "high": "101",
+                    "low": "99",
+                    "close": "100",
+                    "volume": "100",
+                    "open_interest": None,
+                    "adjustment_offset": "10",
+                    "boundary_ids": ["qmb-v1-fixture"],
+                    "source_keys": ["fixture"],
+                }
+            ]
+        else:
+            raise AssertionError(f"unexpected partial request {path}")
+        value = {"items": items, "meta": meta}
+        headers = {
+            "x-markethub-dataset-version": self.publication["dataset_version"],
+            "x-markethub-partial-completeness-revision": self.publication[
+                "partial_completeness_revision"
+            ],
+            "x-markethub-generation-pin": self.publication["generation_pin"],
+        }
+        payload = json.dumps(value).encode()
+        return deepcopy(value), len(payload), 0.001, headers
+
+
 def snapshot(*, catalog_bound: bool = False) -> dict:
     return {
         "schema": "quant-research.market-snapshot-ref.v1",
@@ -734,6 +815,23 @@ def test_partial_snapshot_open_preflights_without_replaying_bars(tmp_path: Path)
     assert transport.coverage_reads == 4
     assert tuple(opened.dataset.bars)
     assert transport.bar_reads == reads_after_resolution + 2
+
+
+def test_partial_snapshot_verification_is_independent_of_request_order(tmp_path: Path) -> None:
+    transport = MultiProductPartialTransport()
+    adapter = MarketHubDataAdapter(client_factory=lambda _: MarketHubClient(transport=transport))
+    manifest = partial_snapshot()
+    manifest["query"]["instruments"] = ["iL0", "agL0"]
+    request_value = SnapshotRequest.from_manifest(manifest)
+    resolved = adapter.resolve(request_value, AdapterStorage.create(tmp_path / "resolve"))
+
+    opened = adapter.open_snapshot(
+        resolved.manifest,
+        AdapterStorage.create(tmp_path / "open"),
+    )
+
+    assert opened.dataset is not None
+    assert tuple(opened.dataset.bars)
 
 
 @pytest.mark.parametrize("kwargs", [{"empty_cursor": True}, {"coverage_count_delta": 1}])

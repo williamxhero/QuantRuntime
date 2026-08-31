@@ -108,7 +108,7 @@ def test_wheel_contains_only_runtime_execution_ownership(tmp_path: Path) -> None
         capture_output=True,
         text=True,
     )
-    wheel = next(output.glob("quant_runtime-0.2.1-*.whl"))
+    wheel = next(output.glob("quant_runtime-0.2.2-*.whl"))
     with ZipFile(wheel) as archive:
         names = set(archive.namelist())
         metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))

@@ -16,7 +16,7 @@ def production_registry() -> AdapterRegistry:
                 "schema": "quant-research.runtime-capability.v1",
                 "backend_id": "qlib",
                 "role": "discovery",
-                "adapter_version": "1.0.0",
+                "adapter_version": "1.0.1",
                 "engine_version": qlib.__version__,
                 "provides": [
                     "data.bar.1d",

@@ -28,7 +28,7 @@ from .cache import CacheUse, MarketHubCache
 from .contract import SnapshotRequest, validate_snapshot_manifest
 from .storage import AdapterStorage
 
-ADAPTER_VERSION = "1.0.0"
+ADAPTER_VERSION = "1.0.1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,13 +246,18 @@ class MarketHubDataAdapter:
         if isinstance(dataset, CanonicalDataset):
             for bar in dataset.bars:
                 bar_counts[bar.instrument] += 1
+        coverage_instruments = (
+            request.instruments
+            if isinstance(dataset, CanonicalDataset)
+            else tuple(item.instrument for item in dataset.instruments)
+        )
         coverage = tuple(
             {
                 "instrument": instrument,
                 "actual_rows": bar_counts[instrument],
                 "complete": bar_counts[instrument] > 0,
             }
-            for instrument in request.instruments
+            for instrument in coverage_instruments
         )
         if any(not item["complete"] for item in coverage):
             raise MarketHubContractError(f"snapshot coverage is incomplete: {coverage!r}")
