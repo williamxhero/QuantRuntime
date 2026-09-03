@@ -48,9 +48,11 @@ class SandboxPolicyRegistry:
                 raise SandboxPolicyError("direct execution requires human allowlisted trust")
             if package_hash not in self._direct_package_hashes:
                 raise SandboxPolicyError("human package identity is not allowlisted")
-        if not generated and value["execution_mode"] == "isolated" and value[
-            "trust_classification"
-        ] not in {"human_isolated", "generated_untrusted"}:
+        if (
+            not generated
+            and value["execution_mode"] == "isolated"
+            and value["trust_classification"] != "human_isolated"
+        ):
             raise SandboxPolicyError("isolated human package has invalid trust classification")
         return ResolvedSandboxPolicy(package_hash, value, sha256_value(value))
 
@@ -87,8 +89,7 @@ def _profile(value: Mapping[str, Any]) -> dict[str, Any]:
         "stderr_bytes",
         "artifacts",
     } or any(
-        not isinstance(item, int) or isinstance(item, bool) or item < 0
-        for item in limits.values()
+        not isinstance(item, int) or isinstance(item, bool) or item < 0 for item in limits.values()
     ):
         raise SandboxPolicyError("sandbox limits are invalid")
     if profile["capabilities"].get("network") != "deny":

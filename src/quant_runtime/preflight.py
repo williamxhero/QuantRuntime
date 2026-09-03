@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import tarfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Protocol
 
@@ -13,7 +12,7 @@ from quant_runtime.adapters.data.markethub import (
     SnapshotRequest,
 )
 from quant_runtime.capabilities import AdapterRegistry
-from quant_runtime.package import StrategyPackage
+from quant_runtime.materialization import VerifiedPackageMaterializer
 from quant_runtime.registry import production_registry
 
 
@@ -49,8 +48,7 @@ class RuntimePreflight:
             required_semantics = _required_semantics(snapshot_value)
             as_of = _as_of(snapshot_value)
             with TemporaryDirectory(prefix="quant-runtime-preflight-") as temporary:
-                package = _materialize_package(
-                    self.client,
+                package = VerifiedPackageMaterializer(self.client).materialize(
                     self.client.get_registered_package(value["strategy_package"]),
                     Path(temporary) / "package",
                 )
@@ -161,38 +159,6 @@ def _as_of(snapshot: Mapping[str, Any]) -> str:
     if parsed.tzinfo is None:
         raise PreflightRequestError("snapshot request as_of must include an offset")
     return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
-
-
-def _materialize_package(
-    client: WorkspacePreflightClientPort,
-    record: dict[str, Any],
-    root: Path,
-) -> StrategyPackage:
-    bundle = record.get("bundle")
-    if not isinstance(bundle, Mapping) or not bundle.get("uri"):
-        raise PreflightRequestError("registered package bundle lacks an artifact URI")
-    uri = str(bundle["uri"])
-    verified = client.verify_artifact(uri)
-    if verified["artifact"]["sha256"] != bundle["sha256"]:
-        raise PreflightRequestError("registered package bundle identity mismatch")
-    archive = root.with_suffix(".tar")
-    materialized = client.materialize_artifact(uri, archive)
-    archive_path = Path(str(materialized["path"]))
-    root.mkdir(parents=True, exist_ok=False)
-    with tarfile.open(archive_path, mode="r:") as package:
-        members = package.getmembers()
-        for member in members:
-            relative = PurePosixPath(member.name)
-            if relative.is_absolute() or ".." in relative.parts:
-                raise PreflightRequestError(
-                    f"strategy package archive path escapes root: {member.name!r}"
-                )
-            if not member.isfile() and not member.isdir():
-                raise PreflightRequestError(
-                    f"strategy package archive contains a special entry: {member.name!r}"
-                )
-        package.extractall(root, members=members, filter="data")
-    return StrategyPackage.from_record(record, root=root)
 
 
 def _failure(classification: str, code: str, message: str) -> dict[str, Any]:

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import tarfile
 from collections.abc import Mapping
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Protocol
 
@@ -16,6 +15,7 @@ from quant_runtime.adapters.interface import DiscoveryRunInput, FormalAdapterRes
 from quant_runtime.artifacts import sha256_bytes, sha256_value, write_json
 from quant_runtime.capabilities import AdapterRegistry, ExecutionPlan, FormalExecution
 from quant_runtime.comparison import compare_results
+from quant_runtime.materialization import VerifiedPackageMaterializer
 from quant_runtime.package import StrategyPackage
 from quant_runtime.registry import production_registry
 
@@ -65,6 +65,7 @@ class RuntimeExecutor:
         self.registry = registry or production_registry()
         self.data_adapter = data_adapter or MarketHubDataAdapter()
         self.worker_id = worker_id
+        self.package_materializer = VerifiedPackageMaterializer(client)
 
     def execute(self, request_id: str) -> dict[str, Any]:
         run = self.client.get_run(request_id)
@@ -79,7 +80,7 @@ class RuntimeExecutor:
             with TemporaryDirectory(prefix=f"quant-runtime-{attempt_id}-") as temporary:
                 root = Path(temporary)
                 run = self.client.get_run(request_id)
-                package = self._materialize_package(run["package"], root / "package")
+                package = self.package_materializer.materialize(run["package"], root / "package")
                 request = _object(run, "request")
                 if _object(request, "strategy_package") != package.package_ref:
                     raise ValueError("hydrated package differs from the immutable run request")
@@ -145,21 +146,6 @@ class RuntimeExecutor:
                     },
                 },
             )
-
-    def _materialize_package(self, record: dict[str, Any], root: Path) -> StrategyPackage:
-        bundle = _object(record, "bundle")
-        uri = str(bundle.get("uri", ""))
-        if not uri:
-            raise ValueError("registered package bundle lacks an artifact URI")
-        verified = self.client.verify_artifact(uri)
-        if verified["artifact"]["sha256"] != bundle["sha256"]:
-            raise ValueError("registered package bundle identity mismatch")
-        archive = root.with_suffix(".tar")
-        materialized = self.client.materialize_artifact(uri, archive)
-        archive_path = Path(str(materialized["path"]))
-        root.mkdir(parents=True, exist_ok=False)
-        _extract_package_tar(archive_path, root)
-        return StrategyPackage.from_record(record, root=root)
 
     def _materialize_workspace_artifact(self, uri: str, destination: Path) -> Path:
         self.client.verify_artifact(uri)
@@ -356,20 +342,6 @@ def _read_semantics(execution: FormalExecution) -> dict[str, Any]:
         "local_cache": local_cache,
         "method": "non_authoritative_cache" if local_cache != "none" else "snapshot_native",
     }
-
-
-def _extract_package_tar(archive: Path, destination: Path) -> None:
-    with tarfile.open(archive, mode="r:") as package:
-        members = package.getmembers()
-        for member in members:
-            relative = PurePosixPath(member.name)
-            if relative.is_absolute() or ".." in relative.parts:
-                raise ValueError(f"strategy package archive path escapes root: {member.name!r}")
-            if not member.isfile() and not member.isdir():
-                raise ValueError(
-                    f"strategy package archive contains a special entry: {member.name!r}"
-                )
-        package.extractall(destination, members=members, filter="data")
 
 
 def _artifact_spec(path: Path, root: Path) -> dict[str, Any]:
