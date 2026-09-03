@@ -25,6 +25,21 @@ def test_production_registry_has_only_real_adapters_and_no_apex_import() -> None
         assert all(term not in content for term in forbidden), path
 
 
+def test_runtime_does_not_add_a_private_control_plane_or_reporting_owner() -> None:
+    files = [ROOT / "pyproject.toml", *sorted((ROOT / "src").rglob("*.py"))]
+    forbidden = (
+        "sqlite3",
+        "strategy_workspace.storage",
+        "strategy_workspace.core",
+        "apex_research",
+        "strategy_reporting",
+        "subprocess",
+    )
+    for path in files:
+        content = path.read_text(encoding="utf-8").lower()
+        assert all(term not in content for term in forbidden), path
+
+
 def test_legacy_workspace_and_manifest_ownership_is_gone() -> None:
     source = ROOT / "src" / "quant_runtime"
     # Ignored interpreter caches can survive a source-tree migration locally.  The
