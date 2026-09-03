@@ -1,17 +1,24 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
 import subprocess
+import sys
+import tarfile
+import time
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import Any
 
+import psutil
+
 from quant_runtime.artifacts import read_json, sha256_value, write_json
 from quant_runtime.sandbox.invocation import PreparedSandboxInvocation
+from quant_runtime.sandbox.outcome import bounded_diagnostics, sandbox_outcome
 
 BACKEND_ID = "docker-engine-linux-oci"
 BACKEND_IMPLEMENTATION = "quant-runtime.oci-backend.v1"
@@ -34,12 +41,18 @@ class OciSandboxConfig:
     docker_executable: str = "docker"
 
     def __post_init__(self) -> None:
-        if "@sha256:" not in self.image or len(self.image.rsplit("@sha256:", 1)[1]) != 64:
+        remote_digest = "@sha256:" in self.image and len(self.image.rsplit("@sha256:", 1)[1]) == 64
+        local_digest = self.image.startswith("sha256:") and len(self.image) == 71
+        if not remote_digest and not local_digest:
             raise ValueError("OCI sandbox image must be pinned by repository digest")
 
     @property
     def image_digest(self) -> str:
-        return "sha256:" + self.image.rsplit("@sha256:", 1)[1]
+        return (
+            self.image
+            if self.image.startswith("sha256:")
+            else "sha256:" + self.image.rsplit("@sha256:", 1)[1]
+        )
 
 
 class OciSandboxBackend:
@@ -88,7 +101,11 @@ class OciSandboxBackend:
         if not isinstance(image, list) or len(image) != 1:
             raise OciBackendError("OCI dependency image identity is unavailable")
         repo_digests = image[0].get("RepoDigests", [])
-        if self.config.image not in repo_digests:
+        if self.config.image.startswith("sha256:"):
+            image_matches = image[0].get("Id") == self.config.image
+        else:
+            image_matches = self.config.image in repo_digests
+        if not image_matches:
             raise OciBackendError("OCI dependency image digest does not match the local image")
         probes = self._adversarial_probes()
         statement = {
@@ -110,7 +127,7 @@ class OciSandboxBackend:
             "controls": {
                 "filesystem": "read-only-rootfs+read-only-input-binds+bounded-output-tmpfs",
                 "network": "isolated-network-namespace-none",
-                "process": "pids-cgroup-one-process",
+                "process": "pids-cgroup-one-candidate-plus-runtime-supervisor",
                 "privilege": "uid-65534+cap-drop-all+no-new-privileges+seccomp",
                 "environment": "no-host-environment-forwarding",
                 "termination": "engine-kill+stopped-state-verification",
@@ -122,6 +139,7 @@ class OciSandboxBackend:
         return json.loads(json.dumps(proof))
 
     def invoke(self, prepared: PreparedSandboxInvocation) -> dict[str, Any]:
+        proof: dict[str, Any] | None = None
         try:
             proof = self.capability_proof()
             profile = _validated_profile(prepared.protocol, proof, self.config.image_digest)
@@ -130,6 +148,7 @@ class OciSandboxBackend:
                 prepared,
                 "policy_rejection",
                 {"code": "sandbox_capability_unverified", "message": _safe_message(exc)},
+                proof=proof,
             )
         write_json(prepared.inputs / "invocation.json", prepared.protocol)
         name = "quant-runtime-" + uuid.uuid4().hex
@@ -148,11 +167,19 @@ class OciSandboxBackend:
                 "--security-opt",
                 "no-new-privileges",
                 "--pids-limit",
-                "1",
+                "2",
                 "--memory",
                 str(limits["memory_bytes"]),
                 "--cpus",
                 "1",
+                "--log-driver",
+                "local",
+                "--log-opt",
+                f"max-size={max(20480, limits['stdout_bytes'] + limits['stderr_bytes'])}",
+                "--log-opt",
+                "max-file=1",
+                "--log-opt",
+                "compress=false",
                 "--ulimit",
                 f"cpu={limits['cpu_seconds']}:{limits['cpu_seconds']}",
                 "--user",
@@ -170,7 +197,7 @@ class OciSandboxBackend:
                 "--tmpfs",
                 "/tmp:rw,noexec,nosuid,nodev,size=16777216",
                 "--tmpfs",
-                f"/sandbox/output:rw,noexec,nosuid,nodev,size={limits['filesystem_bytes']}",
+                f"/sandbox/output:rw,noexec,nosuid,nodev,size={limits['filesystem_bytes']},mode=1777",
                 "--mount",
                 _bind(prepared.package.root, "/sandbox/package"),
                 "--mount",
@@ -185,31 +212,120 @@ class OciSandboxBackend:
                 timeout=30,
             )
             created = True
-            started = self._control(
-                "start",
-                "--attach",
+            self.guard_container(name)
+            self._control("start", name, timeout=15)
+            status, state = self._wait_for_ready_or_terminal(
                 name,
-                timeout=max(1, limits["wall_clock_seconds"]),
-                check=False,
+                prepared,
+                wall_clock_seconds=limits["wall_clock_seconds"],
             )
-            state = _json_output(
-                self._control("inspect", "--format", "{{json .State}}", name, timeout=15)
+            copied_output: Path | None = None
+            if status == "ready":
+                copied_output = self._export_output(
+                    name, prepared.output, maximum_bytes=limits["filesystem_bytes"]
+                )
+                self._terminate(name)
+                state = _json_output(
+                    self._control("inspect", "--format", "{{json .State}}", name, timeout=15)
+                )
+                classification = None
+            else:
+                classification = status
+            logs = self._control("logs", name, timeout=15, check=False)
+            stdout_bytes = len(logs.stdout.encode("utf-8"))
+            stderr_bytes = len(logs.stderr.encode("utf-8"))
+            files = (
+                [path for path in copied_output.rglob("*") if path.is_file()]
+                if copied_output is not None
+                else []
             )
-            if state.get("Running") is not False:
-                raise OciBackendError("sandbox candidate remained running after execution")
-            self._control("cp", f"{name}:/sandbox/output/.", str(prepared.output), timeout=30)
-            result_path = prepared.output / "sandbox-result.json"
-            if started.returncode != 0 and not result_path.is_file():
+            artifacts = [
+                path
+                for path in files
+                if path.name != "sandbox-result.json" and not path.name.startswith(".")
+            ]
+            artifact_bytes = sum(path.stat().st_size for path in artifacts)
+            terminal = _terminal_proof(proof, state)
+            diagnostics = bounded_diagnostics(
+                limits=limits,
+                stdout_bytes=stdout_bytes,
+                stderr_bytes=stderr_bytes,
+                artifact_count=len(artifacts),
+                artifact_bytes=artifact_bytes,
+                artifacts_accepted=min(len(artifacts), limits["artifacts"]),
+                terminal_proof=terminal,
+            )
+            if classification is not None:
+                return _result(
+                    prepared,
+                    classification,
+                    {"code": f"sandbox_{classification}"},
+                    diagnostics=diagnostics,
+                    proof=proof,
+                )
+            if (
+                state.get("OOMKilled") is True
+                or (copied_output is None and state.get("ExitCode") in {137, 152})
+                or len(artifacts) > limits["artifacts"]
+                or artifact_bytes > limits["filesystem_bytes"]
+            ):
+                return _result(
+                    prepared,
+                    "resource_exhaustion",
+                    {"code": "sandbox_resource_limit_exceeded"},
+                    diagnostics=diagnostics,
+                    proof=proof,
+                )
+            if copied_output is None:
+                return _result(
+                    prepared,
+                    "engine_failure",
+                    {"code": "sandbox_worker_terminated_without_result"},
+                    diagnostics=diagnostics,
+                    proof=proof,
+                )
+            result_path = copied_output / "sandbox-result.json"
+            if state.get("ExitCode") != 0 and not result_path.is_file():
                 return _result(
                     prepared,
                     "engine_failure",
                     {"code": "sandbox_worker_failed", "exit_code": state.get("ExitCode")},
+                    diagnostics=diagnostics,
+                    proof=proof,
                 )
-            return read_json(result_path)
-        except subprocess.TimeoutExpired:
-            if created:
-                self._terminate(name)
-            return _result(prepared, "timeout", {"code": "sandbox_wall_clock_exceeded"})
+            worker = read_json(result_path)
+            worker_classification = str(worker.get("classification", ""))
+            if worker_classification not in {
+                "success",
+                "policy_rejection",
+                "resource_exhaustion",
+                "strategy_rejection",
+                "engine_failure",
+            }:
+                raise OciBackendError("sandbox worker returned an invalid classification")
+            payload = worker.get("payload")
+            if worker.get("invocation_id") != prepared.protocol["invocation_id"] or not isinstance(
+                payload, dict
+            ):
+                raise OciBackendError("sandbox worker result identity is invalid")
+            reported = payload.pop("_sandbox_observed", {})
+            if isinstance(reported, dict):
+                diagnostics = bounded_diagnostics(
+                    limits=limits,
+                    stdout_bytes=max(stdout_bytes, int(reported.get("stdout_bytes", 0))),
+                    stderr_bytes=max(stderr_bytes, int(reported.get("stderr_bytes", 0))),
+                    artifact_count=len(artifacts),
+                    artifact_bytes=artifact_bytes,
+                    artifacts_accepted=min(len(artifacts), limits["artifacts"]),
+                    terminal_proof=terminal,
+                )
+            return _result(
+                prepared,
+                worker_classification,
+                payload,
+                diagnostics=diagnostics,
+                proof=proof,
+            )
         except Exception as exc:
             if created:
                 self._terminate(name)
@@ -217,10 +333,53 @@ class OciSandboxBackend:
                 prepared,
                 "engine_failure",
                 {"code": "sandbox_backend_failed", "message": _safe_message(exc)},
+                proof=proof,
             )
         finally:
             if created:
                 self._control("rm", "--force", name, timeout=15, check=False)
+
+    def _wait_for_ready_or_terminal(
+        self,
+        name: str,
+        prepared: PreparedSandboxInvocation,
+        *,
+        wall_clock_seconds: int,
+    ) -> tuple[str | None, dict[str, Any]]:
+        started = time.monotonic()
+        while True:
+            state = _json_output(
+                self._control("inspect", "--format", "{{json .State}}", name, timeout=15)
+            )
+            if state.get("Running") is False:
+                return None, state
+            if prepared.cancellation.cancelled:
+                self._terminate(name)
+                state = _json_output(
+                    self._control("inspect", "--format", "{{json .State}}", name, timeout=15)
+                )
+                return "cancellation", state
+            if time.monotonic() - started >= wall_clock_seconds:
+                self._terminate(name)
+                state = _json_output(
+                    self._control("inspect", "--format", "{{json .State}}", name, timeout=15)
+                )
+                return "timeout", state
+            ready = self._control(
+                "exec",
+                name,
+                "/usr/local/bin/python",
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "raise SystemExit(not Path('/sandbox/output/.ready').is_file())"
+                ),
+                timeout=15,
+                check=False,
+            )
+            if ready.returncode == 0:
+                return "ready", state
+            time.sleep(0.05)
 
     def _adversarial_probes(self) -> dict[str, bool]:
         common = (
@@ -302,7 +461,10 @@ class OciSandboxBackend:
             timeout=30,
             check=False,
         )
-        if process.returncode == 0 or "can't fork" not in (process.stdout + process.stderr):
+        process_output = (process.stdout + process.stderr).lower()
+        if process.returncode == 0 or not any(
+            marker in process_output for marker in ("can't fork", "cannot fork")
+        ):
             raise OciBackendError("OCI process-boundary probe failed")
         name = "quant-runtime-proof-" + uuid.uuid4().hex
         created = False
@@ -340,6 +502,7 @@ class OciSandboxBackend:
         finally:
             if created:
                 self._control("rm", "--force", name, timeout=15, check=False)
+        self._probe_parent_death_guard()
         return {
             "root_filesystem_write_blocked": True,
             "package_bind_read_only": True,
@@ -352,7 +515,144 @@ class OciSandboxBackend:
             "no_new_privileges_enabled": True,
             "additional_process_creation_blocked": True,
             "engine_termination_verified": True,
+            "parent_death_guard_verified": True,
         }
+
+    def _probe_parent_death_guard(self) -> None:
+        name = "quant-runtime-parent-proof-" + uuid.uuid4().hex
+        created = False
+        parent: subprocess.Popen[bytes] | None = None
+        guardian: subprocess.Popen[bytes] | None = None
+        try:
+            self._control(
+                "create",
+                "--name",
+                name,
+                "--network",
+                "none",
+                "--read-only",
+                "--cap-drop",
+                "ALL",
+                "--security-opt",
+                "no-new-privileges",
+                "--pids-limit",
+                "1",
+                "--user",
+                "65534:65534",
+                "--entrypoint",
+                "/bin/sh",
+                self.config.image,
+                "-c",
+                "while :; do :; done",
+                timeout=30,
+            )
+            created = True
+            self._control("start", name, timeout=15)
+            parent = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(300)"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                shell=False,
+            )
+            guardian = self.guard_container(
+                name,
+                parent_pid=parent.pid,
+                parent_created=psutil.Process(parent.pid).create_time(),
+            )
+            parent.kill()
+            parent.wait(timeout=10)
+            guardian.wait(timeout=15)
+            inspected = self._control("inspect", name, timeout=15, check=False)
+            if inspected.returncode == 0:
+                raise OciBackendError("OCI parent-death termination probe failed")
+            created = False
+        finally:
+            if parent is not None and parent.poll() is None:
+                parent.kill()
+                parent.wait(timeout=10)
+            if guardian is not None and guardian.poll() is None:
+                guardian.kill()
+                guardian.wait(timeout=10)
+            if created:
+                self._control("rm", "--force", name, timeout=15, check=False)
+
+    def guard_container(
+        self,
+        name: str,
+        *,
+        parent_pid: int | None = None,
+        parent_created: float | None = None,
+    ) -> subprocess.Popen[bytes]:
+        pid = os.getpid() if parent_pid is None else parent_pid
+        created = psutil.Process(pid).create_time() if parent_created is None else parent_created
+        kwargs: dict[str, Any] = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = (
+                subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+            )
+        else:
+            kwargs["start_new_session"] = True
+        command = [
+            sys.executable,
+            "-m",
+            "quant_runtime.sandbox.guardian",
+            "--docker",
+            self._docker,
+            "--container",
+            name,
+            "--parent-pid",
+            str(pid),
+            "--parent-created",
+            repr(created),
+        ]
+        return subprocess.Popen(command, **kwargs)
+
+    def _export_output(self, name: str, destination: Path, *, maximum_bytes: int) -> Path:
+        completed = subprocess.run(
+            [
+                self._docker,
+                "exec",
+                "--user",
+                "0:0",
+                name,
+                "/usr/local/bin/python",
+                "-c",
+                (
+                    "import sys,tarfile; "
+                    "archive=tarfile.open(fileobj=sys.stdout.buffer,mode='w|'); "
+                    "archive.add('/sandbox/output',arcname='.'); archive.close()"
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            timeout=30,
+            shell=False,
+        )
+        if completed.returncode != 0 or len(completed.stdout) > maximum_bytes + 1_048_576:
+            raise OciBackendError("bounded output export failed")
+        root = destination / "staging"
+        root.mkdir()
+        with tarfile.open(fileobj=io.BytesIO(completed.stdout), mode="r:") as archive:
+            for member in archive.getmembers():
+                relative = PurePosixPath(member.name)
+                if relative.as_posix() in {".", ""} or member.isdir():
+                    continue
+                if relative.is_absolute() or ".." in relative.parts or not member.isfile():
+                    raise OciBackendError("sandbox output contains an unsafe entry")
+                source = archive.extractfile(member)
+                if source is None:
+                    raise OciBackendError("sandbox output cannot be read")
+                target = root.joinpath(*relative.parts)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(source.read())
+        return root
 
     def _terminate(self, name: str) -> None:
         self._control("kill", name, timeout=15, check=False)
@@ -380,7 +680,10 @@ class OciSandboxBackend:
             env={**os.environ, "QUANT_RUNTIME_HOST_SECRET": "must-not-cross-oci-boundary"},
         )
         if check and completed.returncode != 0:
-            raise OciBackendError("Docker Engine control operation failed")
+            detail = " ".join(completed.stderr.splitlines())[:256]
+            raise OciBackendError(
+                f"Docker Engine control operation failed: {arguments[0]}: {detail}"
+            )
         return completed
 
 
@@ -432,22 +735,53 @@ def _json_output(completed: subprocess.CompletedProcess[str]) -> Any:
 
 
 def _result(
-    prepared: PreparedSandboxInvocation, classification: str, payload: dict[str, Any]
+    prepared: PreparedSandboxInvocation,
+    classification: str,
+    payload: dict[str, Any],
+    *,
+    diagnostics: dict[str, Any] | None = None,
+    proof: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    profile = prepared.protocol.get("sandbox_profile", {})
+    limits = profile.get("limits", {}) if isinstance(profile, dict) else {}
+    if diagnostics is None:
+        fallback_limits = {
+            "stdout_bytes": int(limits.get("stdout_bytes", 0)),
+            "stderr_bytes": int(limits.get("stderr_bytes", 0)),
+            "artifacts": int(limits.get("artifacts", 0)),
+        }
+        diagnostics = bounded_diagnostics(
+            limits=fallback_limits,
+            stdout_bytes=0,
+            stderr_bytes=0,
+            artifact_count=0,
+            artifact_bytes=0,
+            artifacts_accepted=0,
+            terminal_proof=_terminal_proof(proof, None),
+        )
+    outcome = sandbox_outcome(classification, diagnostics=diagnostics, payload=payload)
     return {
-        "schema": "quant-runtime.sandbox-worker-result.v1",
+        "schema": "quant-runtime.sandbox-worker-result.v2",
         "invocation_id": prepared.protocol["invocation_id"],
         "classification": classification,
         "payload": payload,
-        "diagnostics": {
-            "stdout_bytes": 0,
-            "stderr_bytes": 0,
-            "artifacts": 0,
-            "truncated": False,
-            "sanitized": True,
-        },
+        "sandbox": outcome,
+    }
+
+
+def _terminal_proof(proof: dict[str, Any] | None, state: dict[str, Any] | None) -> dict[str, Any]:
+    if state is not None and (state.get("Running") is not False or int(state.get("Pid", 0)) != 0):
+        raise OciBackendError("sandbox terminal state is not proven")
+    return {
+        "backend_id": BACKEND_ID,
+        "mechanism_version": MECHANISM_VERSION,
+        "proof_id": proof["proof_id"] if proof is not None else "sha256:" + "0" * 64,
+        "candidate_terminated": True,
+        "descendants_terminated": True,
+        "running_processes": 0,
     }
 
 
 def _safe_message(error: Exception) -> str:
-    return type(error).__name__ + ": " + str(error).splitlines()[0][:256]
+    del error
+    return "sandbox operation failed; inspect bounded internal telemetry"

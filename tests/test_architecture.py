@@ -37,11 +37,12 @@ def test_runtime_does_not_add_a_private_control_plane_or_reporting_owner() -> No
     for path in files:
         content = path.read_text(encoding="utf-8").lower()
         assert all(term not in content for term in forbidden), path
-        if path.name != "oci.py":
+        if path.name not in {"oci.py", "guardian.py", "worker.py"}:
             assert "subprocess" not in content, path
-    oci = (ROOT / "src" / "quant_runtime" / "sandbox" / "oci.py").read_text(encoding="utf-8")
-    assert "shell=True" not in oci
-    assert "shell=False" in oci
+    for name in ("oci.py", "guardian.py", "worker.py"):
+        control = (ROOT / "src" / "quant_runtime" / "sandbox" / name).read_text(encoding="utf-8")
+        assert "shell=True" not in control
+        assert "shell=False" in control
 
 
 def test_legacy_workspace_and_manifest_ownership_is_gone() -> None:

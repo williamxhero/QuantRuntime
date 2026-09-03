@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from hashlib import sha256
@@ -24,12 +25,27 @@ class SandboxInvocationError(ValueError):
     """A sandbox invocation or worker result violates its public protocol."""
 
 
+class CancellationToken:
+    """Thread-safe caller cancellation observed by the production backend."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+
+    def cancel(self) -> None:
+        self._event.set()
+
+    @property
+    def cancelled(self) -> bool:
+        return self._event.is_set()
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedSandboxInvocation:
     protocol: dict[str, Any]
     package: StrategyPackage
     inputs: Path
     output: Path
+    cancellation: CancellationToken
 
 
 class SandboxBackend(Protocol):
@@ -61,6 +77,7 @@ class SandboxRunner:
         phase: str,
         parameters: Mapping[str, Any],
         input_artifacts: Mapping[str, Mapping[str, Any]],
+        cancellation: CancellationToken | None = None,
     ) -> dict[str, Any]:
         if phase not in {"behavioral_conformance", "discovery", "formal"}:
             raise SandboxInvocationError("sandbox requested phase is invalid")
@@ -96,7 +113,9 @@ class SandboxRunner:
                 },
             }
             protocol = {**identity, "invocation_id": "sha256:" + sha256_value(identity)}
-            prepared = PreparedSandboxInvocation(protocol, package, inputs, output)
+            prepared = PreparedSandboxInvocation(
+                protocol, package, inputs, output, cancellation or CancellationToken()
+            )
             return _worker_result(self._backend.invoke(prepared), protocol["invocation_id"])
 
 
@@ -161,6 +180,17 @@ def _materialize_input(client: Any, artifact: dict[str, Any], destination: Path)
 
 def _worker_result(value: Mapping[str, Any], invocation_id: str) -> dict[str, Any]:
     result = {str(key): item for key, item in value.items()}
+    if result.get("schema") == "quant-runtime.sandbox-worker-result.v2":
+        if set(result) != {"schema", "invocation_id", "classification", "payload", "sandbox"}:
+            raise SandboxInvocationError("sandbox worker v2 result shape is invalid")
+        if result["invocation_id"] != invocation_id:
+            raise SandboxInvocationError("sandbox worker result identity mismatch")
+        sandbox = result.get("sandbox")
+        if not isinstance(result.get("payload"), Mapping) or not isinstance(sandbox, Mapping):
+            raise SandboxInvocationError("sandbox worker v2 payload is invalid")
+        if sandbox.get("classification") != result.get("classification"):
+            raise SandboxInvocationError("sandbox worker outcome classification mismatch")
+        return {**result, "payload": dict(result["payload"]), "sandbox": dict(sandbox)}
     if (
         set(result)
         != {

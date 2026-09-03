@@ -67,11 +67,14 @@ class RuntimeConformance:
             payload = _worker_payload(outcome["payload"])
             if payload["status"] == "rejected":
                 return _rejected("strategy_rejection", "strategy failed behavioral conformance")
-            return self._publish(value, package_record, payload, outcome["diagnostics"])
-        except ConformanceRequestError as exc:
-            return _rejected("policy_rejection", str(exc))
-        except Exception as exc:
-            return _rejected("engine_failure", str(exc))
+            diagnostics = outcome.get("diagnostics")
+            if diagnostics is None:
+                diagnostics = outcome.get("sandbox", {}).get("diagnostics", {})
+            return self._publish(value, package_record, payload, diagnostics)
+        except ConformanceRequestError:
+            return _rejected("policy_rejection", "behavioral conformance request rejected")
+        except Exception:
+            return _rejected("engine_failure", "behavioral conformance execution failed")
 
     def _publish(
         self,

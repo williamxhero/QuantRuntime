@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 import shutil
 import subprocess
+import sys
+import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -12,7 +14,7 @@ from strategy_workspace import WorkspaceClient
 from test_sandbox_policy import isolated_profile
 
 from quant_runtime.artifacts import sha256_value
-from quant_runtime.sandbox import SandboxRunner
+from quant_runtime.sandbox import CancellationToken, SandboxRunner
 from quant_runtime.sandbox.backend import UnsupportedSandboxBackend
 from quant_runtime.sandbox.invocation import PreparedSandboxInvocation
 from quant_runtime.sandbox.oci import (
@@ -61,7 +63,7 @@ def test_public_backend_proof_attests_real_kernel_boundaries_and_termination() -
     assert proof["controls"] == {
         "filesystem": "read-only-rootfs+read-only-input-binds+bounded-output-tmpfs",
         "network": "isolated-network-namespace-none",
-        "process": "pids-cgroup-one-process",
+        "process": "pids-cgroup-one-candidate-plus-runtime-supervisor",
         "privilege": "uid-65534+cap-drop-all+no-new-privileges+seccomp",
         "environment": "no-host-environment-forwarding",
         "termination": "engine-kill+stopped-state-verification",
@@ -97,6 +99,7 @@ def test_exact_image_proof_cannot_authorize_a_different_worker_image(tmp_path: P
         SimpleNamespace(root=package),
         inputs,
         output,
+        CancellationToken(),
     )
 
     result = backend.invoke(prepared)
@@ -104,6 +107,76 @@ def test_exact_image_proof_cannot_authorize_a_different_worker_image(tmp_path: P
     assert result["classification"] == "policy_rejection"
     assert result["payload"]["code"] == "sandbox_capability_unverified"
     assert not (inputs / "invocation.json").exists()
+
+
+@pytest.mark.oci
+@pytest.mark.skipif(not _docker_ready(), reason="pinned OCI proof image is unavailable")
+def test_parent_death_guard_kills_and_removes_the_container() -> None:
+    executable = shutil.which("docker")
+    assert executable is not None
+    name = "quant-runtime-parent-proof-" + uuid.uuid4().hex
+    common = [executable]
+    subprocess.run(
+        [
+            *common,
+            "create",
+            "--name",
+            name,
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "1",
+            "--user",
+            "65534:65534",
+            "--entrypoint",
+            "/bin/sh",
+            IMAGE,
+            "-c",
+            "while :; do :; done",
+        ],
+        check=True,
+        capture_output=True,
+        shell=False,
+    )
+    try:
+        subprocess.run([*common, "start", name], check=True, capture_output=True, shell=False)
+        code = (
+            "import time\n"
+            "from quant_runtime.sandbox.oci import OciSandboxBackend,OciSandboxConfig\n"
+            f"backend=OciSandboxBackend(OciSandboxConfig(image={IMAGE!r}))\n"
+            f"backend.guard_container({name!r})\n"
+            "print('ready', flush=True)\n"
+            "time.sleep(300)\n"
+        )
+        parent = subprocess.Popen(
+            [sys.executable, "-c", code],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            shell=False,
+        )
+        assert parent.stdout is not None
+        assert parent.stdout.readline().strip() == "ready"
+        parent.kill()
+        parent.wait(timeout=10)
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            inspected = subprocess.run(
+                [*common, "inspect", name], check=False, capture_output=True, shell=False
+            )
+            if inspected.returncode != 0:
+                break
+            time.sleep(0.1)
+        assert inspected.returncode != 0
+    finally:
+        subprocess.run(
+            [*common, "rm", "--force", name], check=False, capture_output=True, shell=False
+        )
 
 
 def test_unsupported_backend_never_imports_candidate_code(tmp_path: Path) -> None:
@@ -118,23 +191,16 @@ def test_unsupported_backend_never_imports_candidate_code(tmp_path: Path) -> Non
     )
     client = WorkspaceClient(tmp_path / "workspace")
     registered = client.register_package(package)
-    registered["manifest"]["schema"] = "quant-research.strategy-package.v2"
-    registered["declared_content"] = [
-        {
-            "path": path.relative_to(package).as_posix(),
-            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-        }
-        for path in sorted(package.rglob("*"))
-        if path.is_file() and path.name != "strategy.toml"
-    ]
     scenario = client.publish_record(
         {"record_id": "scenario", "record_type": "fixture", "payload": {}},
         artifacts=({"source": b"{}", "logical_role": "scenario", "name": "scenario.json"},),
     )["artifacts"][0]
 
+    profile = isolated_profile()
+    profile["trust_classification"] = "human_isolated"
     result = SandboxRunner(client, backend=UnsupportedSandboxBackend()).invoke(
         package_record=registered,
-        profile=isolated_profile(),
+        profile=profile,
         phase="behavioral_conformance",
         parameters={},
         input_artifacts={"scenario.json": scenario},
@@ -142,4 +208,6 @@ def test_unsupported_backend_never_imports_candidate_code(tmp_path: Path) -> Non
 
     assert result["classification"] == "policy_rejection"
     assert result["payload"]["code"] == "sandbox_platform_unsupported"
+    assert result["sandbox"]["terminal_status"] == "failed"
+    assert result["sandbox"]["diagnostics"]["terminal_proof"]["running_processes"] == 0
     assert not marker.exists()
