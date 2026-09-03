@@ -62,7 +62,7 @@ def test_cli_exposes_runtime_commands_with_strict_json_stdout(
     choices = next(
         action for action in cli.build_parser()._actions if action.dest == "command"
     ).choices
-    assert set(choices) == {"preflight", "run", "retry"}
+    assert set(choices) == {"conformance", "preflight", "run", "retry"}
 
     class Executor:
         def __init__(self, client, worker):
@@ -144,7 +144,7 @@ def test_cli_exposes_side_effect_free_preflight() -> None:
         action for action in cli.build_parser()._actions if action.dest == "command"
     ).choices
 
-    assert set(choices) == {"preflight", "run", "retry"}
+    assert set(choices) == {"conformance", "preflight", "run", "retry"}
 
 
 @pytest.mark.parametrize(

@@ -46,6 +46,16 @@ def test_safe_fixture_invocation_exposes_only_logical_mounts_and_frozen_identiti
 ) -> None:
     client = WorkspaceClient(tmp_path / "workspace")
     registered = client.register_package(PACKAGE)
+    scenario_publication = client.publish_record(
+        {"record_id": "scenario", "record_type": "fixture", "payload": {}},
+        artifacts=(
+            {
+                "source": b"{}",
+                "logical_role": "behavioral-scenario",
+                "name": "scenario.json",
+            },
+        ),
+    )
     backend = FixtureBackend()
     profile = isolated_profile()
     profile["trust_classification"] = "human_isolated"
@@ -55,7 +65,7 @@ def test_safe_fixture_invocation_exposes_only_logical_mounts_and_frozen_identiti
         profile=profile,
         phase="behavioral_conformance",
         parameters={},
-        input_refs={"scenarios": "sha256:" + "d" * 64},
+        input_artifacts={"scenarios.json": scenario_publication["artifacts"][0]},
     )
 
     assert outcome["classification"] == "success"
@@ -128,7 +138,13 @@ def test_unsafe_package_archive_is_rejected_before_backend_call(
             profile=profile,
             phase="behavioral_conformance",
             parameters={},
-            input_refs={"scenarios": "sha256:" + "d" * 64},
+            input_artifacts={
+                "scenarios.json": {
+                    "uri": "workspace-artifact://sha256/" + "d" * 64,
+                    "sha256": "d" * 64,
+                    "bytes": 2,
+                }
+            },
         )
 
     assert backend.calls == 0

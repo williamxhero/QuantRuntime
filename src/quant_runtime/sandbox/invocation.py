@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import os
+import re
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Protocol
@@ -44,6 +48,7 @@ class SandboxRunner:
         backend: SandboxBackend,
         policy_registry: SandboxPolicyRegistry | None = None,
     ) -> None:
+        self._client = client
         self._materializer = VerifiedPackageMaterializer(client)
         self._backend = backend
         self._policy_registry = policy_registry or SandboxPolicyRegistry()
@@ -55,15 +60,11 @@ class SandboxRunner:
         profile: Mapping[str, Any],
         phase: str,
         parameters: Mapping[str, Any],
-        input_refs: Mapping[str, str],
+        input_artifacts: Mapping[str, Mapping[str, Any]],
     ) -> dict[str, Any]:
         if phase not in {"behavioral_conformance", "discovery", "formal"}:
             raise SandboxInvocationError("sandbox requested phase is invalid")
-        frozen_refs = {str(key): str(value) for key, value in sorted(input_refs.items())}
-        if not frozen_refs or any(
-            not value.startswith("sha256:") or len(value) != 71 for value in frozen_refs.values()
-        ):
-            raise SandboxInvocationError("sandbox input references are invalid")
+        artifacts = _input_artifacts(input_artifacts)
         resolved = self._policy_registry.resolve(package_record, profile)
         with TemporaryDirectory(prefix="quant-runtime-sandbox-") as temporary:
             root = Path(temporary)
@@ -75,6 +76,10 @@ class SandboxRunner:
             output = root / "output"
             inputs.mkdir()
             output.mkdir()
+            frozen_refs = {
+                name: _materialize_input(self._client, artifact, inputs / name)
+                for name, artifact in artifacts.items()
+            }
             identity = {
                 "schema": "quant-runtime.sandbox-invocation.v1",
                 "package": package.package_ref,
@@ -92,6 +97,65 @@ class SandboxRunner:
             protocol = {**identity, "invocation_id": "sha256:" + sha256_value(identity)}
             prepared = PreparedSandboxInvocation(protocol, package, inputs, output)
             return _worker_result(self._backend.invoke(prepared), protocol["invocation_id"])
+
+
+def _input_artifacts(
+    value: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    if not value:
+        raise SandboxInvocationError("sandbox input artifacts are required")
+    result: dict[str, dict[str, Any]] = {}
+    for raw_name, raw_artifact in sorted(value.items()):
+        name = str(raw_name)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name):
+            raise SandboxInvocationError("sandbox input logical name is invalid")
+        artifact = {str(key): item for key, item in raw_artifact.items()}
+        required = {"uri", "sha256", "bytes"}
+        if not required <= artifact.keys():
+            raise SandboxInvocationError("sandbox input artifact reference is incomplete")
+        digest = str(artifact["sha256"])
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or artifact["uri"] != "workspace-artifact://sha256/" + digest
+            or not isinstance(artifact["bytes"], int)
+            or isinstance(artifact["bytes"], bool)
+            or artifact["bytes"] < 0
+        ):
+            raise SandboxInvocationError("sandbox input artifact identity is invalid")
+        result[name] = artifact
+    return result
+
+
+def _materialize_input(client: Any, artifact: dict[str, Any], destination: Path) -> str:
+    verification = client.verify_artifact(str(artifact["uri"]))
+    if verification.get("verified") is not True:
+        raise SandboxInvocationError("sandbox input artifact verification failed")
+    verified = verification.get("artifact")
+    if not isinstance(verified, Mapping) or any(
+        verified.get(key) != artifact[key] for key in ("uri", "sha256", "bytes")
+    ):
+        raise SandboxInvocationError("sandbox input artifact verification identity mismatch")
+    materialized = client.materialize_artifact(str(artifact["uri"]), destination)
+    expected = destination.resolve()
+    if materialized.get("materialized") is not True:
+        raise SandboxInvocationError("sandbox input artifact materialization failed")
+    try:
+        actual = Path(str(materialized["path"])).resolve(strict=True)
+    except (KeyError, OSError) as exc:
+        raise SandboxInvocationError("sandbox input artifact materialization is invalid") from exc
+    if actual != expected:
+        raise SandboxInvocationError("sandbox input artifact materialized outside its sealed path")
+    metadata = os.lstat(actual)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or actual.is_symlink()
+        or (getattr(metadata, "st_file_attributes", 0) & 0x400)
+    ):
+        raise SandboxInvocationError("sandbox input artifact is not a regular sealed file")
+    payload = actual.read_bytes()
+    if len(payload) != artifact["bytes"] or sha256(payload).hexdigest() != artifact["sha256"]:
+        raise SandboxInvocationError("sandbox input artifact bytes changed after verification")
+    return "sha256:" + str(artifact["sha256"])
 
 
 def _worker_result(value: Mapping[str, Any], invocation_id: str) -> dict[str, Any]:
