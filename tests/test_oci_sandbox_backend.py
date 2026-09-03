@@ -27,7 +27,7 @@ from quant_runtime.sandbox.oci import (
     OciSandboxConfig,
 )
 
-IMAGE = "sha256:2214c69c6cacfc531d56ea5bbfc613bbf775b06698f66be404590dc2027637bd"
+IMAGE = "sha256:9ddd31405abc557777c536eee44504e49744a763a4327a9b2609ce287b9f57cc"
 
 
 def _docker_ready() -> bool:

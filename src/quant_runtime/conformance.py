@@ -45,7 +45,9 @@ class RuntimeConformance:
         self, client: WorkspaceConformancePort, *, backend: SandboxBackend | None = None
     ) -> None:
         self._client = client
-        self._runner = SandboxRunner(client, backend=backend or production_backend())
+        selected_backend = backend or production_backend()
+        self._production = selected_backend.production
+        self._runner = SandboxRunner(client, backend=selected_backend)
 
     def conform(self, request: Mapping[str, Any]) -> dict[str, Any]:
         try:
@@ -55,12 +57,26 @@ class RuntimeConformance:
                 f"scenario-{index:04d}.json": artifact
                 for index, artifact in enumerate(value["behavioral_scenarios"])
             }
+            inputs = scenarios
+            phase_config = None
+            if self._production:
+                inputs = {
+                    **scenarios,
+                    "parameters.json": self._parameters_artifact(
+                        package_record, value["parameters"]
+                    ),
+                }
+                phase_config = {
+                    "adapter": "runtime",
+                    "entrypoint": _conformance_entrypoint(package_record),
+                }
             outcome = self._runner.invoke(
                 package_record=package_record,
                 profile=value["sandbox_profile"],
                 phase="behavioral_conformance",
                 parameters=value["parameters"],
-                input_artifacts=scenarios,
+                input_artifacts=inputs,
+                phase_config=phase_config,
             )
             if outcome["classification"] != "success":
                 return _rejected(outcome["classification"], "sandbox invocation did not succeed")
@@ -75,6 +91,54 @@ class RuntimeConformance:
             return _rejected("policy_rejection", "behavioral conformance request rejected")
         except Exception:
             return _rejected("engine_failure", "behavioral conformance execution failed")
+
+    def _parameters_artifact(
+        self, package_record: Mapping[str, Any], parameters: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        package_hash = str(package_record["package_ref"]["package_hash"])
+        parameters_hash = sha256_value(dict(parameters))
+        record_id = "sandbox-input." + sha256_value(
+            {
+                "phase": "behavioral_conformance",
+                "package_hash": package_hash,
+                "parameters_hash": parameters_hash,
+            }
+        )
+        payload = {
+            "schema": "quant-runtime.sandbox-input.v1",
+            "phase": "behavioral_conformance",
+            "package_hash": package_hash,
+            "parameters_hash": parameters_hash,
+        }
+        try:
+            publication = self._client.get_record(record_id)
+            if publication.get("payload") != payload:
+                raise ConformanceRequestError("conformance input publication identity conflict")
+        except WorkspaceError as exc:
+            if exc.code != "record_not_found":
+                raise
+            publication = self._client.publish_record(
+                {
+                    "record_id": record_id,
+                    "record_type": "quant-runtime.sandbox-input.v1",
+                    "payload": payload,
+                },
+                artifacts=(
+                    {
+                        "source": canonical_json(dict(parameters)),
+                        "media_type": "application/json",
+                        "logical_role": "sandbox-input",
+                        "name": "parameters.json",
+                    },
+                ),
+            )
+        artifacts = publication.get("artifacts")
+        if not isinstance(artifacts, list) or len(artifacts) != 1:
+            raise ConformanceRequestError("conformance parameters artifact is unavailable")
+        artifact = dict(artifacts[0])
+        if artifact.get("sha256") != sha256_bytes(canonical_json(dict(parameters))):
+            raise ConformanceRequestError("conformance parameters artifact identity mismatch")
+        return artifact
 
     def _publish(
         self,
@@ -207,6 +271,22 @@ def _worker_payload(value: Mapping[str, Any]) -> dict[str, Any]:
         "dimensions": {str(key): dict(item) for key, item in payload["dimensions"].items()},
         "trace": [dict(item) for item in payload["trace"]],
     }
+
+
+def _conformance_entrypoint(package_record: Mapping[str, Any]) -> str:
+    manifest = package_record.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise ConformanceRequestError("registered package manifest is unavailable")
+    implementations = manifest.get("implementations")
+    if not isinstance(implementations, Mapping):
+        raise ConformanceRequestError("registered package implementations are unavailable")
+    conformance = implementations.get("conformance")
+    if not isinstance(conformance, Mapping) or set(conformance) != {"runtime"}:
+        raise ConformanceRequestError("registered package lacks the Runtime conformance interface")
+    entrypoint = conformance.get("runtime")
+    if not isinstance(entrypoint, str) or not entrypoint:
+        raise ConformanceRequestError("registered package conformance entrypoint is invalid")
+    return entrypoint
 
 
 def _rejected(classification: str, message: str) -> dict[str, Any]:

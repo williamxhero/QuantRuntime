@@ -115,7 +115,7 @@ class SandboxRunner:
                     "output": "/sandbox/output",
                 },
             }
-            if phase == "formal":
+            if phase in {"behavioral_conformance", "formal"}:
                 identity["package_manifest"] = package.manifest
             if phase_config:
                 identity["phase_config"] = dict(phase_config)

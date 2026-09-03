@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -43,6 +44,8 @@ def _candidate(arguments: list[str]) -> int:
     protocol_path = Path(arguments[0])
     result_path = Path(arguments[1])
     protocol = _read(protocol_path)
+    if protocol.get("phase") == "behavioral_conformance":
+        return _conformance(protocol, result_path)
     if protocol.get("phase") == "discovery":
         return _discovery(protocol, result_path)
     if protocol.get("phase") == "formal":
@@ -125,6 +128,158 @@ def _candidate(arguments: list[str]) -> int:
         payload["_sandbox_observed"] = {"stdout_bytes": output_bytes, "stderr_bytes": 0}
     _write(result_path, _result(protocol, "success", payload))
     return 0
+
+
+_CONFORMANCE_DIMENSIONS = frozenset(
+    {
+        "decision_time",
+        "warm_up",
+        "strict_comparison",
+        "entry",
+        "exit",
+        "sizing",
+        "state_transition",
+        "add_reduce",
+    }
+)
+
+
+def _conformance(protocol: dict[str, Any], result_path: Path) -> int:
+    from quant_runtime.artifacts import sha256_value
+    from quant_runtime.entrypoint import load_package_entrypoint
+
+    config = protocol.get("phase_config")
+    package_manifest = protocol.get("package_manifest")
+    if (
+        not isinstance(config, dict)
+        or config.get("adapter") != "runtime"
+        or not isinstance(config.get("entrypoint"), str)
+        or not isinstance(package_manifest, dict)
+        or _manifest_conformance_entrypoint(package_manifest) != config.get("entrypoint")
+    ):
+        _write(
+            result_path,
+            _result(protocol, "policy_rejection", {"code": "conformance_protocol_invalid"}),
+        )
+        return 0
+    try:
+        parameters = _read(Path("/sandbox/inputs/parameters.json"))
+        if sha256_value(parameters) != protocol.get("parameters_hash"):
+            raise ValueError("sandbox parameters identity differs")
+        scenarios = _conformance_scenarios(protocol)
+    except Exception:
+        _write(
+            result_path,
+            _result(protocol, "policy_rejection", {"code": "conformance_input_invalid"}),
+        )
+        return 0
+    try:
+        conform = load_package_entrypoint(
+            Path("/sandbox/package"), str(config["entrypoint"])
+        )
+        if not callable(conform):
+            raise TypeError("package conformance entrypoint is not callable")
+        traces: list[dict[str, Any]] = []
+        dimensions = {
+            dimension: {"status": "passed", "observed": "frozen-fixture-exact-match"}
+            for dimension in sorted(_CONFORMANCE_DIMENSIONS)
+        }
+        encoded_bytes = 0
+        rejected = False
+        for index, scenario in enumerate(scenarios):
+            observed = conform(dict(scenario["input"]), dict(parameters))
+            if not isinstance(observed, dict):
+                raise TypeError("package conformance result must be an object")
+            encoded = json.dumps(
+                observed, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+            encoded_bytes += len(encoded)
+            if encoded_bytes > 65_536:
+                raise ValueError("package conformance output is too large")
+            passed = observed == scenario["expected"]
+            dimension = str(scenario["dimension"])
+            if not passed:
+                dimensions[dimension] = {
+                    "status": "rejected",
+                    "observed": "frozen-fixture-mismatch",
+                }
+                rejected = True
+            traces.append(
+                {
+                    "event": index,
+                    "scenario": scenario["scenario_id"],
+                    "dimension": dimension,
+                    "status": "passed" if passed else "rejected",
+                    "expected_hash": sha256_value(scenario["expected"]),
+                    "observed_hash": sha256_value(observed),
+                }
+            )
+    except Exception:
+        _write(
+            result_path,
+            _result(protocol, "strategy_rejection", {"code": "conformance_strategy_rejected"}),
+        )
+        return 0
+    _write(
+        result_path,
+        _result(
+            protocol,
+            "success",
+            {
+                "schema": "quant-runtime.behavioral-conformance.v1",
+                "status": "rejected" if rejected else "passed",
+                "dimensions": dimensions,
+                "trace": traces,
+            },
+        ),
+    )
+    return 0
+
+
+def _manifest_conformance_entrypoint(manifest: dict[str, Any]) -> str | None:
+    implementations = manifest.get("implementations")
+    if not isinstance(implementations, dict):
+        return None
+    conformance = implementations.get("conformance")
+    if not isinstance(conformance, dict) or set(conformance) != {"runtime"}:
+        return None
+    entrypoint = conformance.get("runtime")
+    return entrypoint if isinstance(entrypoint, str) and entrypoint else None
+
+
+def _conformance_scenarios(protocol: dict[str, Any]) -> list[dict[str, Any]]:
+    refs = protocol.get("input_refs")
+    if not isinstance(refs, dict) or "parameters.json" not in refs:
+        raise ValueError("conformance input references are incomplete")
+    names = sorted(name for name in refs if name != "parameters.json")
+    if (
+        not names
+        or len(names) > 256
+        or any(not re.fullmatch(r"scenario-[0-9]{4}\.json", name) for name in names)
+    ):
+        raise ValueError("conformance scenario names are invalid")
+    scenarios: list[dict[str, Any]] = []
+    identifiers: set[str] = set()
+    dimensions: set[str] = set()
+    for name in names:
+        scenario = _read(Path("/sandbox/inputs") / name)
+        if (
+            set(scenario) != {"schema", "scenario_id", "dimension", "input", "expected"}
+            or scenario.get("schema") != "quant-runtime.behavioral-scenario.v1"
+            or not isinstance(scenario.get("scenario_id"), str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", scenario["scenario_id"])
+            or scenario.get("dimension") not in _CONFORMANCE_DIMENSIONS
+            or not isinstance(scenario.get("input"), dict)
+            or not isinstance(scenario.get("expected"), dict)
+            or scenario["scenario_id"] in identifiers
+        ):
+            raise ValueError("conformance scenario is invalid")
+        identifiers.add(scenario["scenario_id"])
+        dimensions.add(str(scenario["dimension"]))
+        scenarios.append(scenario)
+    if dimensions != _CONFORMANCE_DIMENSIONS:
+        raise ValueError("conformance scenarios do not cover every dimension")
+    return scenarios
 
 
 def _discovery(protocol: dict[str, Any], result_path: Path) -> int:

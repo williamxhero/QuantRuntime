@@ -57,7 +57,7 @@ from quant_runtime.sandbox.snapshot import (
     snapshot_capsule_bytes,
 )
 
-IMAGE = "sha256:2214c69c6cacfc531d56ea5bbfc613bbf775b06698f66be404590dc2027637bd"
+IMAGE = "sha256:9ddd31405abc557777c536eee44504e49744a763a4327a9b2609ce287b9f57cc"
 
 
 def generated_package(
@@ -65,10 +65,34 @@ def generated_package(
     *,
     marker: Path,
     formal_symbol: str = "ObservedBarFixtureStrategy",
+    conformance_override: str | None = None,
+    include_conformance: bool = True,
     revision: int = 1,
 ) -> Path:
     root.mkdir()
+    conformance_decision = (
+        "scenario['decision']" if conformance_override is None else repr(conformance_override)
+    )
     files = {
+        "conformance.py": (
+            "conformance-entrypoint",
+            (
+                "from pathlib import Path\n"
+                "import os\n"
+                "import sys\n"
+                "if os.environ.get('QUANT_RUNTIME_PARENT_MARKER'):\n"
+                f"    Path({str(marker)!r}).write_text('parent-conformance-imported')\n"
+                "def conform(scenario, parameters):\n"
+                "    del parameters\n"
+                "    return {\n"
+                f"        'decision': {conformance_decision},\n"
+                "        'qlib_loaded': any(name == 'qlib' or name.startswith('qlib.') "
+                "for name in sys.modules),\n"
+                "        'nautilus_loaded': any(name == 'nautilus_trader' or "
+                "name.startswith('nautilus_trader.') for name in sys.modules),\n"
+                "    }\n"
+            ).encode(),
+        ),
         "parameters.schema.json": (
             "parameter-schema",
             (PACKAGE / "parameters.schema.json").read_bytes(),
@@ -121,6 +145,8 @@ def generated_package(
             ).encode(),
         ),
     }
+    if not include_conformance:
+        del files["conformance.py"]
     for relative, (_, content) in files.items():
         (root / relative).write_bytes(content)
     contents = "\n\n".join(
@@ -129,6 +155,11 @@ def generated_package(
         f'role = "{role}"\n'
         f'sha256 = "{hashlib.sha256(content).hexdigest()}"'
         for relative, (role, content) in sorted(files.items())
+    )
+    conformance_manifest = (
+        '[implementations.conformance]\nruntime = "conformance.py:conform"\n'
+        if include_conformance
+        else ""
     )
     (root / "strategy.toml").write_text(
         f'''schema = "quant-research.strategy-package.v2"
@@ -156,6 +187,8 @@ semantics = [{{ dimension = "time", required = true }}]
 [implementations.discovery]
 qlib = "discovery.py:discover"
 
+{conformance_manifest}
+
 [implementations.formal]
 nautilus = "strategy.py:{formal_symbol}"
 
@@ -176,6 +209,63 @@ record_id = "candidate.generated"
         newline="\n",
     )
     return root
+
+
+class ProductionGuardBackend:
+    production = True
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def invoke(self, prepared):
+        del prepared
+        self.calls += 1
+        raise AssertionError("missing conformance interface must fail before backend invocation")
+
+
+def test_generated_package_without_conformance_interface_fails_before_any_launch(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "generated-imported"
+    client = WorkspaceClient(tmp_path / "workspace")
+    package = client.register_package(
+        generated_package(
+            tmp_path / "generated",
+            marker=marker,
+            include_conformance=False,
+        )
+    )
+    scenario = client.publish_record(
+        {
+            "record_id": "behavioral-scenarios.missing-interface",
+            "record_type": "quant-runtime.behavioral-scenarios.v1",
+            "payload": {},
+        },
+        artifacts=(
+            {
+                "source": canonical_json({}),
+                "logical_role": "behavioral-scenario",
+                "name": "scenario.json",
+            },
+        ),
+    )
+    backend = ProductionGuardBackend()
+    profile = isolated_profile()
+
+    result = RuntimeConformance(client, backend=backend).conform(
+        {
+            "schema": "quant-research.runtime-conformance-request.v1",
+            "strategy_package": package["package_ref"],
+            "parameters": {},
+            "sandbox_profile": profile,
+            "behavioral_scenarios": scenario["artifacts"],
+        }
+    )
+
+    assert result["status"] == "rejected"
+    assert result["observation"]["classification"] == "policy_rejection"
+    assert backend.calls == 0
+    assert not marker.exists()
 
 
 class SandboxedPlanBackend:
@@ -475,6 +565,127 @@ def _image_ready() -> bool:
             shell=False,
         ).returncode
         == 0
+    )
+
+
+@pytest.mark.oci
+@pytest.mark.skipif(not _image_ready(), reason="exact production worker image is unavailable")
+def test_generated_conformance_executes_frozen_fixtures_only_inside_exact_oci_worker(
+    tmp_path: Path, monkeypatch
+) -> None:
+    marker = tmp_path / "parent-conformance-imported"
+    monkeypatch.setenv("QUANT_RUNTIME_PARENT_MARKER", "1")
+    client = WorkspaceClient(tmp_path / "workspace")
+    package = client.register_package(generated_package(tmp_path / "generated", marker=marker))
+    dimensions = (
+        "decision_time",
+        "warm_up",
+        "strict_comparison",
+        "entry",
+        "exit",
+        "sizing",
+        "state_transition",
+        "add_reduce",
+    )
+    scenarios = tuple(
+        {
+            "source": canonical_json(
+                {
+                    "schema": "quant-runtime.behavioral-scenario.v1",
+                    "scenario_id": f"{index:02d}-{dimension}",
+                    "dimension": dimension,
+                    "input": {
+                        "decision": "hold" if dimension == "strict_comparison" else dimension
+                    },
+                    "expected": {
+                        "decision": "hold" if dimension == "strict_comparison" else dimension,
+                        "qlib_loaded": False,
+                        "nautilus_loaded": False,
+                    },
+                }
+            ),
+            "logical_role": "behavioral-scenario",
+            "name": f"{index:02d}-{dimension}.json",
+        }
+        for index, dimension in enumerate(dimensions)
+    )
+    publication = client.publish_record(
+        {
+            "record_id": "behavioral-scenarios.oci",
+            "record_type": "quant-runtime.behavioral-scenarios.v1",
+            "payload": {},
+        },
+        artifacts=scenarios,
+    )
+    backend = OciSandboxBackend(OciSandboxConfig(image=IMAGE))
+    proof = backend.capability_proof(refresh=True)
+    profile = isolated_profile()
+    profile["containment"] = {
+        "backend_id": BACKEND_ID,
+        "implementation": BACKEND_IMPLEMENTATION,
+        "mechanism": MECHANISM,
+        "mechanism_version": MECHANISM_VERSION,
+        "platform": "linux",
+        "proof": proof["proof_id"],
+    }
+    profile["dependency_environment"] = {
+        "kind": "oci-image",
+        "identity": IMAGE,
+        "lock_identity": proof["dependency_lock_identity"],
+    }
+    profile["capabilities"]["subprocess"] = "bounded"
+    profile["limits"].update(
+        {
+            "memory_bytes": 536_870_912,
+            "wall_clock_seconds": 30,
+            "processes": PRODUCTION_PROCESS_LIMIT,
+            "filesystem_bytes": 10_485_760,
+        }
+    )
+
+    result = RuntimeConformance(client, backend=backend).conform(
+        {
+            "schema": "quant-research.runtime-conformance-request.v1",
+            "strategy_package": package["package_ref"],
+            "parameters": {},
+            "sandbox_profile": profile,
+            "behavioral_scenarios": publication["artifacts"],
+        }
+    )
+
+    assert result["status"] == "accepted", result
+    evidence = client.get_record(result["behavioral_conformance"]["conformance_id"])["payload"]
+    assert set(evidence["dimensions"]) == set(dimensions)
+    assert {item["status"] for item in evidence["dimensions"].values()} == {"passed"}
+    assert all(item["status"] == "passed" for item in evidence["trace"])
+    assert evidence["evidence_level"] == "behavioral-conformance"
+    assert "formal" not in evidence and "performance" not in evidence
+    assert not marker.exists()
+
+    rejected_package = client.register_package(
+        generated_package(
+            tmp_path / "generated-boundary-rejected",
+            marker=marker,
+            conformance_override="enter",
+            revision=2,
+        )
+    )
+    rejected = RuntimeConformance(client, backend=backend).conform(
+        {
+            "schema": "quant-research.runtime-conformance-request.v1",
+            "strategy_package": rejected_package["package_ref"],
+            "parameters": {},
+            "sandbox_profile": profile,
+            "behavioral_scenarios": publication["artifacts"],
+        }
+    )
+
+    assert rejected["status"] == "rejected"
+    assert rejected["observation"]["classification"] == "strategy_rejection"
+    assert all(
+        record["record_type"] != "quant-runtime.behavioral-conformance.v1"
+        or record["payload"]["package_hash"] != rejected_package["package_ref"]["package_hash"]
+        for record in client.list_records()
     )
 
 
