@@ -10,22 +10,43 @@ from quant_runtime.adapters.data.markethub import (
     MarketHubDataAdapter,
     ResolvedSnapshot,
 )
+from quant_runtime.adapters.discovery.qlib.capsule import (
+    build_discovery_capsule,
+    capsule_bytes,
+)
 from quant_runtime.adapters.formal.nautilus.reporting_input import REPORTING_INPUT_SCHEMA
-from quant_runtime.adapters.interface import DiscoveryRunInput, FormalAdapterResult, FormalRunInput
-from quant_runtime.artifacts import sha256_bytes, sha256_value, write_json
+from quant_runtime.adapters.interface import (
+    DiscoveryAdapterResult,
+    DiscoveryRunInput,
+    FormalAdapterResult,
+    FormalRunInput,
+)
+from quant_runtime.artifacts import canonical_json, sha256_bytes, sha256_value, write_json
 from quant_runtime.capabilities import AdapterRegistry, ExecutionPlan, FormalExecution
 from quant_runtime.comparison import compare_results
 from quant_runtime.materialization import VerifiedPackageMaterializer
 from quant_runtime.package import StrategyPackage
 from quant_runtime.registry import production_registry
+from quant_runtime.sandbox import SandboxRunner
+from quant_runtime.sandbox.oci import production_backend
+from quant_runtime.sandbox.outcome import workspace_run_error
 
 WORKER_ID = "quant-runtime/0.2.3"
+
+
+class SandboxAttemptFailure(RuntimeError):
+    def __init__(self, outcome: Mapping[str, Any]) -> None:
+        super().__init__("sandbox attempt failed")
+        self.outcome = dict(outcome)
 
 
 class WorkspaceClientPort(Protocol):
     def get_run(self, run_id: str) -> dict[str, Any]: ...
     def verify_artifact(self, artifact_uri: str) -> dict[str, Any]: ...
     def materialize_artifact(self, artifact_uri: str, destination: Path) -> dict[str, Any]: ...
+    def publish_record(
+        self, record: Mapping[str, Any], *, artifacts: tuple[Mapping[str, Any], ...] = ()
+    ) -> dict[str, Any]: ...
 
 
 class WorkspaceWorkerPort(Protocol):
@@ -59,12 +80,14 @@ class RuntimeExecutor:
         registry: AdapterRegistry | None = None,
         data_adapter: MarketHubDataAdapter | None = None,
         worker_id: str = WORKER_ID,
+        sandbox_backend: Any | None = None,
     ) -> None:
         self.client = client
         self.worker = worker
         self.registry = registry or production_registry()
         self.data_adapter = data_adapter or MarketHubDataAdapter()
         self.worker_id = worker_id
+        self.sandbox_backend = sandbox_backend
         self.package_materializer = VerifiedPackageMaterializer(client)
 
     def execute(self, request_id: str) -> dict[str, Any]:
@@ -119,6 +142,8 @@ class RuntimeExecutor:
                     storage=storage,
                     request_hash=str(run["request_hash"]),
                     identity=identity,
+                    package_record=_object(run, "package"),
+                    request=request,
                 )
                 if result["outcome"] == "rejected":
                     return self.worker.reject_attempt(
@@ -131,6 +156,8 @@ class RuntimeExecutor:
                     result,
                     artifacts=artifact_specs,
                 )
+        except SandboxAttemptFailure as exc:
+            return self.worker.fail_attempt(request_id, workspace_run_error(exc.outcome))
         except Exception as exc:
             return self.worker.fail_attempt(
                 request_id,
@@ -212,37 +239,70 @@ class RuntimeExecutor:
         storage: AdapterStorage,
         request_hash: str,
         identity: dict[str, Any],
+        package_record: dict[str, Any],
+        request: dict[str, Any],
     ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
         output.mkdir(parents=True, exist_ok=True)
         discovery_result = None
+        discovery_outcome = None
         if plan.discovery_adapter is not None:
-            adapter = self.registry.create("discovery", plan.discovery_adapter)
-            discovery_result = adapter.run(
-                DiscoveryRunInput(
+            if request.get("schema") == "quant-research.workspace-run-request.v4":
+                discovery_result, discovery_outcome = self._run_sandbox_discovery(
+                    package_record=package_record,
                     package=package,
+                    profile=_object(request, "sandbox_profile"),
                     parameters=parameters,
                     snapshot=snapshot,
                     output=output / "discovery" / plan.discovery_adapter,
                     config=plan.discovery_config,
                 )
-            )
+            else:
+                adapter = self.registry.create("discovery", plan.discovery_adapter)
+                discovery_result = adapter.run(
+                    DiscoveryRunInput(
+                        package=package,
+                        parameters=parameters,
+                        snapshot=snapshot,
+                        output=output / "discovery" / plan.discovery_adapter,
+                        config=plan.discovery_config,
+                    )
+                )
 
-        formal_results = tuple(
-            self._run_formal(
-                request_id,
-                execution=item,
-                package=package,
-                parameters=parameters,
-                snapshot=snapshot,
-                output=output / "formal" / item.formal_id,
-                storage=storage,
-            )
-            for item in plan.formal
+        strategy_rejected = (
+            discovery_outcome is not None
+            and discovery_outcome["classification"] == "strategy_rejection"
         )
-        comparison = compare_results(plan.topology, formal_results, agreement=plan.agreement)
-        rejected = comparison is not None and comparison.get("status") == "rejected"
+
+        formal_results = (
+            ()
+            if strategy_rejected
+            else tuple(
+                self._run_formal(
+                    request_id,
+                    execution=item,
+                    package=package,
+                    parameters=parameters,
+                    snapshot=snapshot,
+                    output=output / "formal" / item.formal_id,
+                    storage=storage,
+                )
+                for item in plan.formal
+            )
+        )
+        comparison = (
+            None
+            if strategy_rejected
+            else compare_results(plan.topology, formal_results, agreement=plan.agreement)
+        )
+        rejected = strategy_rejected or (
+            comparison is not None and comparison.get("status") == "rejected"
+        )
         result: dict[str, Any] = {
-            "schema": "quant-research.result.v2",
+            "schema": (
+                "quant-research.result.v3"
+                if discovery_outcome is not None
+                else "quant-research.result.v2"
+            ),
             "outcome": "rejected" if rejected else "completed",
             "summary": {
                 "request_id": request_id,
@@ -262,10 +322,16 @@ class RuntimeExecutor:
                 "adapter": discovery_result.backend_id,
                 "metrics": discovery_result.metrics,
             }
+        if discovery_outcome is not None:
+            result["sandbox"] = discovery_outcome
         if comparison is not None:
             result["comparison"] = comparison
         if rejected:
-            result["reason"] = "agreement gate rejected the formal executions"
+            result["reason"] = (
+                "strategy rejected Qlib discovery"
+                if strategy_rejected
+                else "agreement gate rejected the formal executions"
+            )
 
         _write_native_evidence_indexes(output)
         manifest = {
@@ -283,6 +349,89 @@ class RuntimeExecutor:
             _artifact_spec(path, output) for path in sorted(output.rglob("*")) if path.is_file()
         )
         return result, specs
+
+    def _run_sandbox_discovery(
+        self,
+        *,
+        package_record: dict[str, Any],
+        package: StrategyPackage,
+        profile: dict[str, Any],
+        parameters: dict[str, Any],
+        snapshot: ResolvedSnapshot,
+        output: Path,
+        config: dict[str, Any],
+    ) -> tuple[DiscoveryAdapterResult | None, dict[str, Any]]:
+        capsule = build_discovery_capsule(snapshot)
+        publication = self.client.publish_record(
+            {
+                "record_id": "sandbox-input."
+                + sha256_value(
+                    {
+                        "capsule_id": capsule["capsule_id"],
+                        "parameters_hash": sha256_value(parameters),
+                    }
+                ),
+                "record_type": "quant-runtime.sandbox-input.v1",
+                "created_at": snapshot.manifest["resolved_at"],
+                "payload": {
+                    "schema": "quant-runtime.sandbox-input.v1",
+                    "snapshot_id": snapshot.snapshot_id,
+                    "capsule_id": capsule["capsule_id"],
+                    "parameters_hash": sha256_value(parameters),
+                },
+            },
+            artifacts=(
+                {
+                    "source": capsule_bytes(capsule),
+                    "media_type": "application/json",
+                    "logical_role": "sandbox-input",
+                    "name": "discovery-capsule.json",
+                },
+                {
+                    "source": canonical_json(parameters),
+                    "media_type": "application/json",
+                    "logical_role": "sandbox-input",
+                    "name": "parameters.json",
+                },
+            ),
+        )
+        inputs = {item["name"]: item for item in publication["artifacts"]}
+        runner = SandboxRunner(
+            self.client,
+            backend=self.sandbox_backend or production_backend(),
+        )
+        value = runner.invoke(
+            package_record=package_record,
+            profile=profile,
+            phase="discovery",
+            parameters=parameters,
+            input_artifacts=inputs,
+            phase_config={
+                "adapter": "qlib",
+                "config": config,
+                "entrypoint": package.resolve_entrypoint("discovery", "qlib"),
+                "snapshot_id": snapshot.snapshot_id,
+            },
+            output_destination=output,
+        )
+        outcome = _object(value, "sandbox")
+        if value["classification"] == "strategy_rejection":
+            return None, outcome
+        if value["classification"] != "success":
+            raise SandboxAttemptFailure(outcome)
+        payload = _object(value, "payload")
+        metrics = _object(payload, "metrics")
+        return (
+            DiscoveryAdapterResult(
+                backend_id=str(payload["backend_id"]),
+                adapter_version=str(payload["adapter_version"]),
+                engine_version=str(payload["engine_version"]),
+                artifact_hash=str(payload["artifact_hash"]),
+                metrics=metrics,
+                evidence=tuple(payload.get("evidence", ())),
+            ),
+            outcome,
+        )
 
     def _run_formal(
         self,

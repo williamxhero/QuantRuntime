@@ -107,6 +107,10 @@ class OciSandboxBackend:
             image_matches = self.config.image in repo_digests
         if not image_matches:
             raise OciBackendError("OCI dependency image digest does not match the local image")
+        labels = image[0].get("Config", {}).get("Labels") or {}
+        lock_identity = labels.get("org.quant-runtime.dependency-lock", self.config.image_digest)
+        if not isinstance(lock_identity, str) or not _sha256_identity(lock_identity):
+            raise OciBackendError("OCI dependency lock identity is invalid")
         probes = self._adversarial_probes()
         statement = {
             "schema": "quant-runtime.oci-capability-proof.v1",
@@ -123,6 +127,7 @@ class OciSandboxBackend:
             },
             "dependency_image": self.config.image,
             "dependency_identity": self.config.image_digest,
+            "dependency_lock_identity": lock_identity,
             "security_options": sorted(str(item) for item in options),
             "controls": {
                 "filesystem": "read-only-rootfs+read-only-input-binds+bounded-output-tmpfs",
@@ -714,7 +719,11 @@ def _validated_profile(
         "proof": proof["proof_id"],
     }:
         raise ValueError("sandbox profile does not match the proven OCI mechanism")
-    if dependency != {"kind": "oci-image", "identity": image_digest}:
+    if dependency != {
+        "kind": "oci-image",
+        "identity": image_digest,
+        "lock_identity": proof["dependency_lock_identity"],
+    }:
         raise ValueError("sandbox dependency identity does not match the OCI image")
     if capabilities != {"network": "deny", "filesystem": "sealed", "subprocess": "deny"}:
         raise ValueError("sandbox capabilities are not the production default-deny set")
@@ -785,3 +794,11 @@ def _terminal_proof(proof: dict[str, Any] | None, state: dict[str, Any] | None) 
 def _safe_message(error: Exception) -> str:
     del error
     return "sandbox operation failed; inspect bounded internal telemetry"
+
+
+def _sha256_identity(value: str) -> bool:
+    return (
+        value.startswith("sha256:")
+        and len(value) == 71
+        and all(item in "0123456789abcdef" for item in value[7:])
+    )

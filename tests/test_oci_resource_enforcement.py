@@ -19,7 +19,7 @@ from quant_runtime.sandbox.oci import (
     OciSandboxConfig,
 )
 
-IMAGE = "sha256:15c448b12dc408ebb72972818bd0b598e4a2cc51a5740d3c530c059218c1f354"
+IMAGE = "sha256:786db3c1998c8355621e4941f1235735356695557b6dbb8f49213958e19f6370"
 
 
 def _image_ready() -> bool:
@@ -92,7 +92,11 @@ def _prepared(
             "platform": "linux",
             "proof": proof["proof_id"],
         },
-        "dependency_environment": {"kind": "oci-image", "identity": IMAGE},
+        "dependency_environment": {
+            "kind": "oci-image",
+            "identity": IMAGE,
+            "lock_identity": proof["dependency_lock_identity"],
+        },
         "capabilities": {"network": "deny", "filesystem": "sealed", "subprocess": "deny"},
         "limits": budget,
     }

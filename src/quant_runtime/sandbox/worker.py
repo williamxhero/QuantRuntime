@@ -42,6 +42,8 @@ def _candidate(arguments: list[str]) -> int:
     protocol_path = Path(arguments[0])
     result_path = Path(arguments[1])
     protocol = _read(protocol_path)
+    if protocol.get("phase") == "discovery":
+        return _discovery(protocol, result_path)
     if protocol.get("phase") != "sandbox_probe":
         _write(result_path, _result(protocol, "policy_rejection", {"code": "worker_phase_invalid"}))
         return 0
@@ -106,6 +108,83 @@ def _candidate(arguments: list[str]) -> int:
     if mode == "output":
         payload["_sandbox_observed"] = {"stdout_bytes": output_bytes, "stderr_bytes": 0}
     _write(result_path, _result(protocol, "success", payload))
+    return 0
+
+
+def _discovery(protocol: dict[str, Any], result_path: Path) -> int:
+    from quant_runtime.adapters.discovery.qlib.adapter import (
+        QlibStrategyError,
+        run_qlib_discovery_frame,
+    )
+    from quant_runtime.adapters.discovery.qlib.capsule import load_discovery_capsule
+    from quant_runtime.artifacts import sha256_value
+
+    config = protocol.get("phase_config")
+    package = protocol.get("package")
+    if (
+        not isinstance(config, dict)
+        or config.get("adapter") != "qlib"
+        or not isinstance(config.get("entrypoint"), str)
+        or not isinstance(config.get("snapshot_id"), str)
+        or not isinstance(package, dict)
+        or not isinstance(package.get("package_hash"), str)
+    ):
+        _write(
+            result_path,
+            _result(protocol, "policy_rejection", {"code": "discovery_protocol_invalid"}),
+        )
+        return 0
+    try:
+        parameters = _read(Path("/sandbox/inputs/parameters.json"))
+        if sha256_value(parameters) != protocol.get("parameters_hash"):
+            raise ValueError("sandbox parameters identity differs")
+    except Exception:
+        _write(
+            result_path,
+            _result(protocol, "policy_rejection", {"code": "discovery_input_invalid"}),
+        )
+        return 0
+    try:
+        frame = load_discovery_capsule(
+            Path("/sandbox/inputs/discovery-capsule.json"),
+            snapshot_id=config["snapshot_id"],
+        )
+        result = run_qlib_discovery_frame(
+            package_root=Path("/sandbox/package"),
+            entrypoint=config["entrypoint"],
+            package_hash=package["package_hash"],
+            parameters=parameters,
+            snapshot_id=config["snapshot_id"],
+            frame=frame,
+            output=result_path.parent,
+        )
+    except QlibStrategyError:
+        _write(
+            result_path,
+            _result(protocol, "strategy_rejection", {"code": "qlib_strategy_rejected"}),
+        )
+        return 0
+    except Exception:
+        _write(
+            result_path,
+            _result(protocol, "engine_failure", {"code": "qlib_engine_failed"}),
+        )
+        return 0
+    _write(
+        result_path,
+        _result(
+            protocol,
+            "success",
+            {
+                "backend_id": result.backend_id,
+                "adapter_version": result.adapter_version,
+                "engine_version": result.engine_version,
+                "artifact_hash": result.artifact_hash,
+                "metrics": result.metrics,
+                "evidence": list(result.evidence),
+            },
+        ),
+    )
     return 0
 
 

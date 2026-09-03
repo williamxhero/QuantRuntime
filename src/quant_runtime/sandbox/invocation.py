@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import stat
 import threading
 from collections.abc import Mapping
@@ -78,6 +79,8 @@ class SandboxRunner:
         parameters: Mapping[str, Any],
         input_artifacts: Mapping[str, Mapping[str, Any]],
         cancellation: CancellationToken | None = None,
+        phase_config: Mapping[str, Any] | None = None,
+        output_destination: Path | None = None,
     ) -> dict[str, Any]:
         if phase not in {"behavioral_conformance", "discovery", "formal"}:
             raise SandboxInvocationError("sandbox requested phase is invalid")
@@ -112,11 +115,16 @@ class SandboxRunner:
                     "output": "/sandbox/output",
                 },
             }
+            if phase_config:
+                identity["phase_config"] = dict(phase_config)
             protocol = {**identity, "invocation_id": "sha256:" + sha256_value(identity)}
             prepared = PreparedSandboxInvocation(
                 protocol, package, inputs, output, cancellation or CancellationToken()
             )
-            return _worker_result(self._backend.invoke(prepared), protocol["invocation_id"])
+            result = _worker_result(self._backend.invoke(prepared), protocol["invocation_id"])
+            if output_destination is not None and result["classification"] == "success":
+                _copy_worker_output(output / "staging", output_destination)
+            return result
 
 
 def _input_artifacts(
@@ -227,3 +235,21 @@ def _worker_result(value: Mapping[str, Any], invocation_id: str) -> dict[str, An
     }:
         raise SandboxInvocationError("sandbox worker diagnostics shape is invalid")
     return {**result, "payload": dict(result["payload"]), "diagnostics": diagnostics}
+
+
+def _copy_worker_output(source: Path, destination: Path) -> None:
+    if not source.is_dir():
+        raise SandboxInvocationError("successful sandbox invocation lacks output artifacts")
+    destination.mkdir(parents=True, exist_ok=True)
+    for path in sorted(source.rglob("*")):
+        relative = path.relative_to(source)
+        if relative.as_posix() == "sandbox-result.json" or path.name.startswith("."):
+            continue
+        if path.is_symlink() or (path.exists() and not path.is_file() and not path.is_dir()):
+            raise SandboxInvocationError("sandbox output contains an unsupported file type")
+        target = destination / relative
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, target)
