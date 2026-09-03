@@ -115,6 +115,8 @@ class SandboxRunner:
                     "output": "/sandbox/output",
                 },
             }
+            if phase == "formal":
+                identity["package_manifest"] = package.manifest
             if phase_config:
                 identity["phase_config"] = dict(phase_config)
             protocol = {**identity, "invocation_id": "sha256:" + sha256_value(identity)}

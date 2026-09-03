@@ -19,7 +19,14 @@ from quant_runtime.adapters.interface import FormalAdapterResult, FormalRunInput
 from quant_runtime.artifacts import artifact_records
 from quant_runtime.entrypoint import load_package_entrypoint
 
-ADAPTER_VERSION = "1.1.1"
+ADAPTER_VERSION = "1.2.0"
+OPERATIONAL_METRICS = frozenset(
+    {"data_injection_seconds", "engine_run_seconds", "rss_before_bytes", "rss_after_bytes"}
+)
+
+
+class NautilusStrategyError(RuntimeError):
+    """A package-owned formal entrypoint could not be accepted by Runtime."""
 
 
 class NautilusWorkspaceAdapter:
@@ -41,10 +48,13 @@ class NautilusWorkspaceAdapter:
                 raise ValueError("formal cache input differs from the verified snapshot input")
             cache_consumed = True
             read_method = "non_authoritative_cache"
-        strategy_class = load_package_entrypoint(
-            value.package.root,
-            value.package.resolve_entrypoint("formal", self.name),
-        )
+        try:
+            strategy_class = load_package_entrypoint(
+                value.package.root,
+                value.package.resolve_entrypoint("formal", self.name),
+            )
+        except Exception as exc:
+            raise NautilusStrategyError("Nautilus strategy entrypoint was rejected") from exc
         config = _formal_config(value)
         if isinstance(dataset, CanonicalFuturesDataset):
             result = run_futures_engine(
@@ -81,7 +91,11 @@ class NautilusWorkspaceAdapter:
             engine_version=self.engine_version,
             status="completed",
             metrics={
-                **result.metrics,
+                **{
+                    key: item
+                    for key, item in result.metrics.items()
+                    if key not in OPERATIONAL_METRICS
+                },
                 "strategy_package_hash": value.package.package_hash,
                 "parameters_hash": value.package.parameters_hash(value.parameters),
                 "snapshot_id": value.snapshot.snapshot_id,

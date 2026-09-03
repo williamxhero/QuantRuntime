@@ -29,6 +29,8 @@ SUPPORTED_RUNC = "1.3.4"
 MECHANISM_VERSION = (
     f"docker-{SUPPORTED_ENGINE}/containerd-{SUPPORTED_CONTAINERD}/runc-{SUPPORTED_RUNC}"
 )
+PRODUCTION_PROCESS_LIMIT = 127
+OCI_PIDS_LIMIT = PRODUCTION_PROCESS_LIMIT + 1
 
 
 class OciBackendError(RuntimeError):
@@ -132,7 +134,7 @@ class OciSandboxBackend:
             "controls": {
                 "filesystem": "read-only-rootfs+read-only-input-binds+bounded-output-tmpfs",
                 "network": "isolated-network-namespace-none",
-                "process": "pids-cgroup-one-candidate-plus-runtime-supervisor",
+                "process": f"pids-cgroup-bounded-{OCI_PIDS_LIMIT}",
                 "privilege": "uid-65534+cap-drop-all+no-new-privileges+seccomp",
                 "environment": "no-host-environment-forwarding",
                 "termination": "engine-kill+stopped-state-verification",
@@ -172,7 +174,7 @@ class OciSandboxBackend:
                 "--security-opt",
                 "no-new-privileges",
                 "--pids-limit",
-                "2",
+                str(OCI_PIDS_LIMIT),
                 "--memory",
                 str(limits["memory_bytes"]),
                 "--cpus",
@@ -457,19 +459,39 @@ class OciSandboxBackend:
         if security.strip() != expected:
             raise OciBackendError("OCI filesystem/network/environment/privilege probe failed")
         process = self._control(
-            *common,
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
             "--pids-limit",
-            "1",
+            str(OCI_PIDS_LIMIT),
+            "--user",
+            "65534:65534",
+            "--entrypoint",
+            "/usr/local/bin/python",
             self.config.image,
             "-c",
-            "/bin/true & child=$!; wait $child",
+            (
+                "import subprocess; children=[]; blocked=False\n"
+                "try:\n"
+                " while len(children)<512: children.append(subprocess.Popen(['/bin/sleep','30']))\n"
+                "except OSError: blocked=True\n"
+                "finally:\n"
+                " [child.kill() for child in children]\n"
+                " [child.wait() for child in children]\n"
+                "print(f'blocked={blocked} spawned={len(children)}')"
+            ),
             timeout=30,
             check=False,
         )
-        process_output = (process.stdout + process.stderr).lower()
-        if process.returncode == 0 or not any(
-            marker in process_output for marker in ("can't fork", "cannot fork")
-        ):
+        values = dict(item.split("=", 1) for item in process.stdout.strip().split())
+        spawned = int(values.get("spawned", "512"))
+        if process.returncode != 0 or values.get("blocked") != "True" or not 1 <= spawned < 512:
             raise OciBackendError("OCI process-boundary probe failed")
         name = "quant-runtime-proof-" + uuid.uuid4().hex
         created = False
@@ -518,7 +540,7 @@ class OciSandboxBackend:
             "network_namespace_has_loopback_only": True,
             "effective_capabilities_empty": True,
             "no_new_privileges_enabled": True,
-            "additional_process_creation_blocked": True,
+            "additional_process_creation_bounded": True,
             "engine_termination_verified": True,
             "parent_death_guard_verified": True,
         }
@@ -713,6 +735,7 @@ def _validated_profile(
     limits = profile.get("limits")
     if containment != {
         "backend_id": BACKEND_ID,
+        "implementation": BACKEND_IMPLEMENTATION,
         "mechanism": MECHANISM,
         "mechanism_version": MECHANISM_VERSION,
         "platform": "linux",
@@ -725,10 +748,12 @@ def _validated_profile(
         "lock_identity": proof["dependency_lock_identity"],
     }:
         raise ValueError("sandbox dependency identity does not match the OCI image")
-    if capabilities != {"network": "deny", "filesystem": "sealed", "subprocess": "deny"}:
+    if capabilities != {"network": "deny", "filesystem": "sealed", "subprocess": "bounded"}:
         raise ValueError("sandbox capabilities are not the production default-deny set")
-    if not isinstance(limits, dict) or limits.get("processes") != 1:
-        raise ValueError("production sandbox requires a one-process pids cgroup")
+    if not isinstance(limits, dict) or limits.get("processes") != PRODUCTION_PROCESS_LIMIT:
+        raise ValueError(
+            "production sandbox process capacity does not match the proven pids cgroup"
+        )
     return profile
 
 

@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,8 @@ def _candidate(arguments: list[str]) -> int:
     protocol = _read(protocol_path)
     if protocol.get("phase") == "discovery":
         return _discovery(protocol, result_path)
+    if protocol.get("phase") == "formal":
+        return _formal(protocol, result_path)
     if protocol.get("phase") != "sandbox_probe":
         _write(result_path, _result(protocol, "policy_rejection", {"code": "worker_phase_invalid"}))
         return 0
@@ -82,13 +85,26 @@ def _candidate(arguments: list[str]) -> int:
             )
             return 0
     elif mode == "process":
+        processes: list[subprocess.Popen[bytes]] = []
         blocked = False
         try:
-            process = subprocess.Popen(["/bin/sh", "-c", "sleep 300"], shell=False)
-            process.kill()
+            while len(processes) < 512:
+                processes.append(subprocess.Popen(["/bin/sleep", "300"], shell=False))
         except OSError:
             blocked = True
-        _write(result_path, _result(protocol, "success", {"spawn_blocked": blocked}))
+        finally:
+            for process in processes:
+                process.kill()
+            for process in processes:
+                process.wait()
+        _write(
+            result_path,
+            _result(
+                protocol,
+                "success",
+                {"spawn_blocked": blocked, "spawned_processes": len(processes)},
+            ),
+        )
         return 0
     elif mode == "malformed":
         result_path.write_text("{", encoding="utf-8")
@@ -188,6 +204,88 @@ def _discovery(protocol: dict[str, Any], result_path: Path) -> int:
     return 0
 
 
+def _formal(protocol: dict[str, Any], result_path: Path) -> int:
+    from quant_runtime.adapters.formal.nautilus.adapter import (
+        NautilusStrategyError,
+        NautilusWorkspaceAdapter,
+    )
+    from quant_runtime.adapters.interface import FormalRunInput
+    from quant_runtime.artifacts import sha256_value
+    from quant_runtime.package import StrategyPackage
+    from quant_runtime.sandbox.snapshot import load_snapshot_capsule
+
+    config = protocol.get("phase_config")
+    package_ref = protocol.get("package")
+    package_manifest = protocol.get("package_manifest")
+    if (
+        not isinstance(config, dict)
+        or config.get("adapter") != "nautilus"
+        or not isinstance(config.get("formal_id"), str)
+        or not isinstance(config.get("snapshot_id"), str)
+        or not isinstance(config.get("config"), dict)
+        or not isinstance(package_ref, dict)
+        or not isinstance(package_manifest, dict)
+    ):
+        _write(
+            result_path, _result(protocol, "policy_rejection", {"code": "formal_protocol_invalid"})
+        )
+        return 0
+    try:
+        parameters = _read(Path("/sandbox/inputs/parameters.json"))
+        if sha256_value(parameters) != protocol.get("parameters_hash"):
+            raise ValueError("sandbox parameters identity differs")
+        snapshot = load_snapshot_capsule(
+            Path("/sandbox/inputs/snapshot-capsule.json"),
+            snapshot_id=config["snapshot_id"],
+        )
+        package = StrategyPackage.from_record(
+            {"package_ref": package_ref, "manifest": package_manifest},
+            Path("/sandbox/package"),
+        )
+        if package.resolve_entrypoint("formal", "nautilus") != config.get("entrypoint"):
+            raise ValueError("sandbox formal entrypoint identity differs")
+    except Exception:
+        _write(result_path, _result(protocol, "policy_rejection", {"code": "formal_input_invalid"}))
+        return 0
+    try:
+        result = NautilusWorkspaceAdapter().run(
+            FormalRunInput(
+                package=package,
+                parameters=parameters,
+                snapshot=snapshot,
+                output=result_path.parent,
+                config=config["config"],
+                cache_path=None,
+                cache_policy=str(config.get("cache_policy", "none")),
+                cache_transform_version=None,
+            ),
+            formal_id=config["formal_id"],
+        )
+    except NautilusStrategyError:
+        _write(
+            result_path,
+            _result(protocol, "strategy_rejection", {"code": "nautilus_strategy_rejected"}),
+        )
+        return 0
+    except Exception as exc:
+        strategy_owned = _originated_in_package(exc)
+        _write(
+            result_path,
+            _result(
+                protocol,
+                "strategy_rejection" if strategy_owned else "engine_failure",
+                {
+                    "code": (
+                        "nautilus_strategy_rejected" if strategy_owned else "nautilus_engine_failed"
+                    )
+                },
+            ),
+        )
+        return 0
+    _write(result_path, _result(protocol, "success", result.as_contract()))
+    return 0
+
+
 def _result(
     protocol: dict[str, Any], classification: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
@@ -204,6 +302,22 @@ def _result(
             "sanitized": True,
         },
     }
+
+
+def _originated_in_package(exc: BaseException) -> bool:
+    package_root = Path("/sandbox/package")
+    return any(
+        _is_relative_to(Path(frame.f_code.co_filename), package_root)
+        for frame, _ in traceback.walk_tb(exc.__traceback__)
+    )
+
+
+def _is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root)
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 def _read(path: Path) -> dict[str, Any]:

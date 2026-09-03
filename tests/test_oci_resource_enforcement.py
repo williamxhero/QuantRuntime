@@ -13,13 +13,15 @@ from quant_runtime.sandbox import CancellationToken
 from quant_runtime.sandbox.invocation import PreparedSandboxInvocation
 from quant_runtime.sandbox.oci import (
     BACKEND_ID,
+    BACKEND_IMPLEMENTATION,
     MECHANISM,
     MECHANISM_VERSION,
+    PRODUCTION_PROCESS_LIMIT,
     OciSandboxBackend,
     OciSandboxConfig,
 )
 
-IMAGE = "sha256:786db3c1998c8355621e4941f1235735356695557b6dbb8f49213958e19f6370"
+IMAGE = "sha256:2214c69c6cacfc531d56ea5bbfc613bbf775b06698f66be404590dc2027637bd"
 
 
 def _image_ready() -> bool:
@@ -72,7 +74,7 @@ def _prepared(
         "cpu_seconds": 2,
         "memory_bytes": 67_108_864,
         "wall_clock_seconds": 10,
-        "processes": 1,
+        "processes": PRODUCTION_PROCESS_LIMIT,
         "filesystem_bytes": 1_048_576,
         "stdout_bytes": 20_480,
         "stderr_bytes": 20_480,
@@ -87,6 +89,7 @@ def _prepared(
         "trust_classification": "generated_untrusted",
         "containment": {
             "backend_id": BACKEND_ID,
+            "implementation": BACKEND_IMPLEMENTATION,
             "mechanism": MECHANISM,
             "mechanism_version": MECHANISM_VERSION,
             "platform": "linux",
@@ -97,7 +100,7 @@ def _prepared(
             "identity": IMAGE,
             "lock_identity": proof["dependency_lock_identity"],
         },
-        "capabilities": {"network": "deny", "filesystem": "sealed", "subprocess": "deny"},
+        "capabilities": {"network": "deny", "filesystem": "sealed", "subprocess": "bounded"},
         "limits": budget,
     }
     return PreparedSandboxInvocation(

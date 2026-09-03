@@ -22,11 +22,12 @@ from quant_runtime.sandbox.oci import (
     BACKEND_IMPLEMENTATION,
     MECHANISM,
     MECHANISM_VERSION,
+    PRODUCTION_PROCESS_LIMIT,
     OciSandboxBackend,
     OciSandboxConfig,
 )
 
-IMAGE = "valkey/valkey@sha256:e1095c6c76ee982cb2d1e07edbb7fb2a53606630a1d810d5a47c9f646b708bf5"
+IMAGE = "sha256:2214c69c6cacfc531d56ea5bbfc613bbf775b06698f66be404590dc2027637bd"
 
 
 def _docker_ready() -> bool:
@@ -63,7 +64,7 @@ def test_public_backend_proof_attests_real_kernel_boundaries_and_termination() -
     assert proof["controls"] == {
         "filesystem": "read-only-rootfs+read-only-input-binds+bounded-output-tmpfs",
         "network": "isolated-network-namespace-none",
-        "process": "pids-cgroup-one-candidate-plus-runtime-supervisor",
+        "process": "pids-cgroup-bounded-128",
         "privilege": "uid-65534+cap-drop-all+no-new-privileges+seccomp",
         "environment": "no-host-environment-forwarding",
         "termination": "engine-kill+stopped-state-verification",
@@ -78,13 +79,15 @@ def test_exact_image_proof_cannot_authorize_a_different_worker_image(tmp_path: P
     profile = isolated_profile()
     profile["containment"] = {
         "backend_id": BACKEND_ID,
+        "implementation": BACKEND_IMPLEMENTATION,
         "mechanism": MECHANISM,
         "mechanism_version": MECHANISM_VERSION,
         "platform": "linux",
         "proof": proof["proof_id"],
     }
     profile["dependency_environment"] = {"kind": "oci-image", "identity": "sha256:" + "d" * 64}
-    profile["limits"]["processes"] = 1
+    profile["capabilities"]["subprocess"] = "bounded"
+    profile["limits"]["processes"] = PRODUCTION_PROCESS_LIMIT
     inputs = tmp_path / "inputs"
     output = tmp_path / "output"
     package = tmp_path / "package"
