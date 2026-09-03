@@ -133,6 +133,11 @@ def test_sandboxed_run_conforms_before_preflight_and_freezes_the_pass_ref(
         def __init__(self, workspace):
             del workspace
 
+        def register_package(self, package_path):
+            events.append("register_package")
+            assert package_path == tmp_path / "generated-package"
+            return {"package_ref": {"package_hash": "registered"}}
+
         def submit_run(self, request):
             events.append("submit_run")
             assert request["behavioral_conformance"] == conformance_ref
@@ -150,6 +155,7 @@ def test_sandboxed_run_conforms_before_preflight_and_freezes_the_pass_ref(
         def conform(self, request):
             events.append("conformance")
             assert "behavioral_scenarios" in request
+            assert request["strategy_package"] == {"package_hash": "registered"}
             return {"status": "accepted", "behavioral_conformance": conformance_ref}
 
     class Preflight:
@@ -196,10 +202,20 @@ def test_sandboxed_run_conforms_before_preflight_and_freezes_the_pass_ref(
         encoding="utf-8",
     )
 
-    result = cli._run(tmp_path / "workspace", request_path, None)
+    result = cli._run(
+        tmp_path / "workspace",
+        request_path,
+        tmp_path / "generated-package",
+    )
 
     assert result["status"] == "completed"
-    assert events == ["conformance", "preflight", "submit_run", "attempt"]
+    assert events == [
+        "register_package",
+        "conformance",
+        "preflight",
+        "submit_run",
+        "attempt",
+    ]
 
 
 def test_sandboxed_run_rejection_has_zero_preflight_submission_or_attempt_calls(

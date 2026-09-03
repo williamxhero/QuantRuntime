@@ -65,6 +65,7 @@ def generated_package(
     *,
     marker: Path,
     formal_symbol: str = "ObservedBarFixtureStrategy",
+    revision: int = 1,
 ) -> Path:
     root.mkdir()
     files = {
@@ -132,7 +133,7 @@ def generated_package(
     (root / "strategy.toml").write_text(
         f'''schema = "quant-research.strategy-package.v2"
 strategy_id = "generated.discovery"
-revision = 1
+revision = {revision}
 display_name = "Generated discovery"
 parameter_schema = "parameters.schema.json"
 
@@ -569,34 +570,6 @@ def test_generated_qlib_entrypoint_imports_only_inside_exact_oci_worker(
     assert result["sandbox"]["diagnostics"]["terminal_proof"]["running_processes"] == 0
     assert not marker.exists()
 
-    rejected_package = client.register_package(
-        generated_package(
-            tmp_path / "generated-rejected",
-            marker=marker,
-            formal_symbol="MissingStrategy",
-        )
-    )
-    rejected_output = tmp_path / "rejected-output"
-    rejected = SandboxRunner(client, backend=backend).invoke(
-        package_record=rejected_package,
-        profile=profile,
-        phase="formal",
-        parameters={},
-        input_artifacts={item["name"]: item for item in publication["artifacts"]},
-        phase_config={
-            "adapter": "nautilus",
-            "formal_id": "primary",
-            "config": {},
-            "entrypoint": "strategy.py:MissingStrategy",
-            "snapshot_id": snapshot.snapshot_id,
-            "cache_policy": "none",
-        },
-        output_destination=rejected_output,
-    )
-    assert rejected["classification"] == "strategy_rejection"
-    assert rejected["payload"] == {"code": "nautilus_strategy_rejected"}
-    assert not rejected_output.exists()
-
 
 @pytest.mark.oci
 @pytest.mark.skipif(not _image_ready(), reason="exact production worker image is unavailable")
@@ -689,6 +662,35 @@ def test_generated_nautilus_entrypoint_runs_only_inside_exact_oci_worker(
     assert (output / "strategy_decisions.json").is_file()
     assert result["sandbox"]["diagnostics"]["terminal_proof"]["running_processes"] == 0
     assert not marker.exists()
+
+    rejected_package = client.register_package(
+        generated_package(
+            tmp_path / "generated-rejected",
+            marker=marker,
+            formal_symbol="MissingStrategy",
+            revision=2,
+        )
+    )
+    rejected_output = tmp_path / "rejected-output"
+    rejected = SandboxRunner(client, backend=backend).invoke(
+        package_record=rejected_package,
+        profile=profile,
+        phase="formal",
+        parameters={},
+        input_artifacts={item["name"]: item for item in publication["artifacts"]},
+        phase_config={
+            "adapter": "nautilus",
+            "formal_id": "primary",
+            "config": {},
+            "entrypoint": "strategy.py:MissingStrategy",
+            "snapshot_id": snapshot.snapshot_id,
+            "cache_policy": "none",
+        },
+        output_destination=rejected_output,
+    )
+    assert rejected["classification"] == "strategy_rejection"
+    assert rejected["payload"] == {"code": "nautilus_strategy_rejected"}
+    assert not rejected_output.exists()
 
 
 @pytest.mark.oci
