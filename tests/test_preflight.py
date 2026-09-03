@@ -5,10 +5,11 @@ from copy import deepcopy
 from pathlib import Path
 
 from conftest import PACKAGE, FixtureTransport
-from strategy_workspace import WorkspaceClient
+from strategy_workspace import WorkspaceClient, WorkspaceWorker
 from test_executor_topologies import registry
 
 from quant_runtime.adapters.data.markethub import MarketHubClient, MarketHubDataAdapter
+from quant_runtime.executor import RuntimeExecutor
 from quant_runtime.preflight import RuntimePreflight
 
 
@@ -97,3 +98,61 @@ def test_preflight_failure_is_classified_and_leaves_workspace_unchanged(
     assert workspace_state(workspace) == before
     assert client.list_runs() == []
     assert client.list_records() == []
+
+
+def test_required_unavailable_pit_semantics_fails_before_workspace_submission(
+    tmp_path: Path, market_fixture: dict
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = WorkspaceClient(workspace)
+    package = client.register_package(PACKAGE)
+    value = draft(package["package_ref"])
+    value["snapshot_request"]["required_semantics"] = ["point_in_time"]
+    before = workspace_state(workspace)
+
+    result = preflight(workspace, market_fixture).preflight(value)
+
+    assert result["status"] == "failed"
+    assert result["observation"]["code"] == "data_semantics_unavailable"
+    assert workspace_state(workspace) == before
+    assert client.list_runs() == []
+
+
+def test_post_preflight_drift_fails_the_submitted_attempt_without_replacement_or_retry(
+    tmp_path: Path, market_fixture: dict
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = WorkspaceClient(workspace)
+    package = client.register_package(PACKAGE)
+    prepared = preflight(workspace, market_fixture).preflight(draft(package["package_ref"]))
+    assert prepared["status"] == "accepted"
+    submitted = client.submit_run(
+        {
+            "schema": "quant-research.workspace-run-request.v3",
+            "strategy_package": package["package_ref"],
+            "market_snapshot": prepared["frozen_snapshot"],
+            "parameters": {},
+            "execution": draft(package["package_ref"])["execution"],
+        }
+    )
+
+    class DriftTransport(FixtureTransport):
+        def request_json(self, *args, **kwargs):
+            value, size, elapsed = super().request_json(*args, **kwargs)
+            if args[1] == "/api/health" and self.health_reads == 2:
+                value["dataset_versions"]["stock_daily_1d"] = "fixture-daily-v2"
+            return value, size, elapsed
+
+    failed = RuntimeExecutor(
+        client,
+        WorkspaceWorker(workspace),
+        registry=registry(),
+        data_adapter=MarketHubDataAdapter(
+            client_factory=lambda _: MarketHubClient(transport=DriftTransport(market_fixture))
+        ),
+    ).execute(submitted["run_id"])
+
+    assert failed["status"] == "failed"
+    assert len(failed["attempts"]) == 1
+    assert failed["request"]["market_snapshot"] == prepared["frozen_snapshot"]
+    assert "version drift" in failed["error"]["message"]

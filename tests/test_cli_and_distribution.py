@@ -12,6 +12,48 @@ from test_executor_topologies import request, snapshot
 from quant_runtime import cli
 
 
+def frozen_snapshot() -> dict:
+    return {
+        "schema": "quant-research.market-snapshot-ref.v2",
+        "snapshot_id": "sha256:" + "a" * 64,
+        "mode": "reference",
+        "trust_policy": "verified_immutable",
+        "source": {
+            "adapter": "markethub",
+            "adapter_version": "1.0.1",
+            "endpoint_contract": "v2",
+            "base_url": "http://fixture",
+            "data_revision": "fixture-global-v1:fixture-daily-v1",
+        },
+        "query": {
+            "instruments": ["SH.600000", "SZ.000001"],
+            "start": "2025-01-01",
+            "end": "2025-01-31",
+            "frequency": "1d",
+            "adjustment": "none",
+        },
+        "calendar": "cn-equity-v1",
+        "contract_mapping": None,
+        "as_of": "2025-02-01T00:00:00Z",
+        "required_semantics": ["field_availability", "time"],
+        "data_semantics": {
+            "field_availability": {"status": "verified", "reason": "fixture"},
+            "point_in_time": {"status": "not_evaluated", "reason": "fixture"},
+            "time": {"status": "verified", "reason": "fixture"},
+            "provider_lineage": {"status": "not_evaluated", "reason": "fixture"},
+        },
+        "verification": {
+            "canonical_input_hash": "b" * 64,
+            "data_version": "fixture-global-v1",
+            "dataset_version": "fixture-daily-v1",
+            "catalog_hash": "c" * 64,
+            "calendar_hash": "d" * 64,
+            "coverage_hash": "e" * 64,
+        },
+        "resolved_at": "2025-02-01T00:00:00Z",
+    }
+
+
 def test_cli_exposes_runtime_commands_with_strict_json_stdout(
     monkeypatch,
     tmp_path: Path,
@@ -36,16 +78,41 @@ def test_cli_exposes_runtime_commands_with_strict_json_stdout(
             }
 
     monkeypatch.setattr(cli, "RuntimeExecutor", Executor)
+    monkeypatch.setattr(
+        cli,
+        "RuntimePreflight",
+        lambda client: type(
+            "Preflight",
+            (),
+            {
+                "preflight": lambda self, draft: {
+                    "status": "accepted",
+                    "frozen_snapshot": frozen_snapshot(),
+                }
+            },
+        )(),
+    )
     request_path = tmp_path / "request.json"
-    value = request(
-        {
+    value = {
+        "schema": "quant-research.runtime-preflight-request.v1",
+        "strategy_package": {
             "schema": "quant-research.strategy-package-ref.v1",
             "strategy_id": "placeholder",
             "revision": 1,
             "package_hash": "0" * 64,
         },
-        "formal_only",
-    )
+        "snapshot_request": {},
+        "parameters": {},
+        "execution": request(
+            {
+                "schema": "quant-research.strategy-package-ref.v1",
+                "strategy_id": "placeholder",
+                "revision": 1,
+                "package_hash": "0" * 64,
+            },
+            "formal_only",
+        )["execution"],
+    }
     request_path.write_text(json.dumps(value), encoding="utf-8")
     assert (
         cli.main(

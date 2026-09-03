@@ -85,16 +85,38 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _run(workspace: Path, request_path: Path, package_path: Path | None) -> dict[str, Any]:
     client = WorkspaceClient(workspace)
     worker = WorkspaceWorker(workspace)
-    request = _read_request(request_path)
+    draft = _read_request(request_path)
     if package_path is not None:
         registered = client.register_package(package_path)
-        request["strategy_package"] = registered["package_ref"]
-    submitted = client.submit_run(request)
+        draft["strategy_package"] = registered["package_ref"]
+    preflight = RuntimePreflight(client).preflight(draft)
+    if preflight["status"] != "accepted":
+        observation = preflight["observation"]
+        return {
+            "run_id": None,
+            "status": "failed",
+            "current_attempt_id": None,
+            "result": None,
+            "error": observation,
+        }
+    submitted = client.submit_run(_canonical_run_request(draft, preflight["frozen_snapshot"]))
     return RuntimeExecutor(client, worker).execute(str(submitted["run_id"]))
 
 
 def _preflight(workspace: Path, request_path: Path) -> dict[str, Any]:
     return RuntimePreflight(WorkspaceClient(workspace)).preflight(_read_request(request_path))
+
+
+def _canonical_run_request(draft: dict[str, Any], frozen_snapshot: Any) -> dict[str, Any]:
+    if not isinstance(frozen_snapshot, dict):
+        raise ValueError("accepted preflight lacks a frozen snapshot")
+    return {
+        "schema": "quant-research.workspace-run-request.v3",
+        "strategy_package": draft["strategy_package"],
+        "market_snapshot": frozen_snapshot,
+        "parameters": draft["parameters"],
+        "execution": draft["execution"],
+    }
 
 
 def _retry(workspace: Path, request_id: str) -> dict[str, Any]:
@@ -117,8 +139,8 @@ def _read_request(path: Path) -> dict[str, Any]:
 def _stdout_payload(run: dict[str, Any]) -> dict[str, Any]:
     return {
         "status": run["status"],
-        "request_id": run["run_id"],
-        "attempt_id": run["current_attempt_id"],
+        "request_id": run.get("run_id"),
+        "attempt_id": run.get("current_attempt_id"),
         "result": run.get("result"),
         "error": run.get("error"),
     }
