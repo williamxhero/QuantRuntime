@@ -83,6 +83,7 @@ class SandboxRunner:
             identity = {
                 "schema": "quant-runtime.sandbox-invocation.v1",
                 "package": package.package_ref,
+                "sandbox_profile": resolved.profile,
                 "profile_hash": resolved.identity_hash,
                 "dependency_environment": resolved.profile["dependency_environment"],
                 "phase": phase,

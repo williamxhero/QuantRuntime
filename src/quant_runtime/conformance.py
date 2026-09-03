@@ -7,8 +7,8 @@ from strategy_workspace import WorkspaceError
 
 from quant_runtime.artifacts import canonical_json, sha256_bytes, sha256_value
 from quant_runtime.sandbox import SandboxRunner
-from quant_runtime.sandbox.backend import UnsupportedSandboxBackend
 from quant_runtime.sandbox.invocation import SandboxBackend
+from quant_runtime.sandbox.oci import production_backend
 
 DIMENSIONS = frozenset(
     {
@@ -45,7 +45,7 @@ class RuntimeConformance:
         self, client: WorkspaceConformancePort, *, backend: SandboxBackend | None = None
     ) -> None:
         self._client = client
-        self._runner = SandboxRunner(client, backend=backend or UnsupportedSandboxBackend())
+        self._runner = SandboxRunner(client, backend=backend or production_backend())
 
     def conform(self, request: Mapping[str, Any]) -> dict[str, Any]:
         try:

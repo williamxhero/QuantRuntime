@@ -11,6 +11,7 @@ from strategy_workspace import WorkspaceClient, WorkspaceWorker
 from quant_runtime.conformance import RuntimeConformance
 from quant_runtime.executor import RuntimeExecutor
 from quant_runtime.preflight import RuntimePreflight
+from quant_runtime.sandbox.oci import OciSandboxBackend, OciSandboxConfig
 
 DEFAULT_WORKSPACE = Path(r"D:\WILL\STOCK\QuantResearch\runtime\workspace")
 
@@ -40,6 +41,11 @@ def build_parser() -> argparse.ArgumentParser:
     conformance.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     conformance.add_argument("--request", type=Path, required=True)
 
+    sandbox_proof = commands.add_parser(
+        "sandbox-proof", help="attest the configured Linux OCI containment mechanism"
+    )
+    sandbox_proof.add_argument("--image", required=True)
+
     run = commands.add_parser("run", help="submit and execute a Workspace run request")
     run.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     run.add_argument("--package", type=Path)
@@ -60,6 +66,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.command == "conformance":
             payload = _conformance(arguments.workspace, arguments.request)
             exit_code = 0 if payload["status"] == "accepted" else 1
+        elif arguments.command == "sandbox-proof":
+            payload = OciSandboxBackend(OciSandboxConfig(image=arguments.image)).capability_proof()
+            exit_code = 0
         elif arguments.command == "run":
             run = _run(arguments.workspace, arguments.request, arguments.package)
             payload = _stdout_payload(run)

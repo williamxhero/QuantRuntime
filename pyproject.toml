@@ -37,6 +37,7 @@ testpaths = ["tests"]
 markers = [
   "connected: requires the live yosef-server MarketHub endpoint",
   "engine: requires the pinned NautilusTrader runtime",
+  "oci: requires the pinned Docker Engine Linux OCI backend",
 ]
 
 [tool.uv.sources]

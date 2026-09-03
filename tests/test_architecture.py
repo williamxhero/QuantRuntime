@@ -33,11 +33,15 @@ def test_runtime_does_not_add_a_private_control_plane_or_reporting_owner() -> No
         "strategy_workspace.core",
         "apex_research",
         "strategy_reporting",
-        "subprocess",
     )
     for path in files:
         content = path.read_text(encoding="utf-8").lower()
         assert all(term not in content for term in forbidden), path
+        if path.name != "oci.py":
+            assert "subprocess" not in content, path
+    oci = (ROOT / "src" / "quant_runtime" / "sandbox" / "oci.py").read_text(encoding="utf-8")
+    assert "shell=True" not in oci
+    assert "shell=False" in oci
 
 
 def test_legacy_workspace_and_manifest_ownership_is_gone() -> None:
