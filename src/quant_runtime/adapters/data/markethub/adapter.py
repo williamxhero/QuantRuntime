@@ -87,6 +87,78 @@ class MarketHubDataAdapter:
             "materialized snapshots must be published as Strategy Workspace ArtifactRefs"
         )
 
+    def freeze_reference(
+        self,
+        request: SnapshotRequest,
+        *,
+        as_of: str,
+        required_semantics: tuple[str, ...],
+    ) -> dict[str, Any]:
+        """Return an in-memory, verified reference without publishing any state."""
+
+        if request.snapshot_mode != "reference" or request.trust_policy != "verified_immutable":
+            raise MarketHubContractError(
+                "preflight requires a verified immutable MarketHub reference snapshot"
+            )
+        verification = self.read(request)
+        semantics = {
+            "field_availability": {
+                "status": "verified",
+                "reason": "MarketHub returned canonical fields for the exact request",
+            },
+            "point_in_time": {
+                "status": "not_evaluated",
+                "reason": (
+                    "the published MarketHub contract does not expose historical field availability"
+                ),
+            },
+            "time": {
+                "status": "verified",
+                "reason": "MarketHub calendar and ordered canonical bars were verified",
+            },
+            "provider_lineage": {
+                "status": "not_evaluated",
+                "reason": (
+                    "the published MarketHub contract does not expose raw-field provider lineage"
+                ),
+            },
+        }
+        for name in required_semantics:
+            if semantics[name]["status"] != "verified":
+                raise MarketHubContractError(
+                    f"required data semantic is not available: {name}={semantics[name]['status']}"
+                )
+        revision = (
+            verification.dataset.reference_revision
+            if isinstance(verification.dataset, CanonicalFuturesDataset)
+            else f"{verification.dataset.data_version}:{verification.dataset.dataset_version}"
+        )
+        source = self._source(request, revision)
+        identity = {
+            **request.identity_payload(),
+            "source": source,
+            "trust_policy": "verified_immutable",
+            "as_of": as_of,
+            "required_semantics": list(required_semantics),
+            "data_semantics": semantics,
+            "verification": verification.manifest_value,
+        }
+        return {
+            "schema": "quant-research.market-snapshot-ref.v2",
+            "snapshot_id": f"sha256:{sha256_value(identity)}",
+            "mode": "reference",
+            "trust_policy": "verified_immutable",
+            "source": source,
+            "query": identity["query"],
+            "calendar": request.calendar,
+            "contract_mapping": request.contract_mapping,
+            "as_of": as_of,
+            "required_semantics": list(required_semantics),
+            "data_semantics": semantics,
+            "verification": verification.manifest_value,
+            "resolved_at": _now(),
+        }
+
     def open_snapshot(
         self,
         manifest: dict[str, Any],

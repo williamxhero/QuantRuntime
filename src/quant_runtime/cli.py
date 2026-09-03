@@ -9,6 +9,7 @@ from typing import Any, NoReturn
 from strategy_workspace import WorkspaceClient, WorkspaceWorker
 
 from quant_runtime.executor import RuntimeExecutor
+from quant_runtime.preflight import RuntimePreflight
 
 DEFAULT_WORKSPACE = Path(r"D:\WILL\STOCK\QuantResearch\runtime\workspace")
 
@@ -26,6 +27,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = JsonArgumentParser(prog="quant-runtime")
     commands = parser.add_subparsers(dest="command", required=True)
 
+    preflight = commands.add_parser(
+        "preflight", help="validate and freeze a draft request without submitting a Workspace run"
+    )
+    preflight.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+    preflight.add_argument("--request", type=Path, required=True)
+
     run = commands.add_parser("run", help="submit and execute a Workspace run request")
     run.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     run.add_argument("--package", type=Path)
@@ -40,12 +47,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         arguments = build_parser().parse_args(argv)
-        if arguments.command == "run":
+        if arguments.command == "preflight":
+            payload = _preflight(arguments.workspace, arguments.request)
+            exit_code = 0 if payload["status"] == "accepted" else 1
+        elif arguments.command == "run":
             run = _run(arguments.workspace, arguments.request, arguments.package)
+            payload = _stdout_payload(run)
+            exit_code = 0 if run["status"] in {"completed", "rejected"} else 1
         else:
             run = _retry(arguments.workspace, arguments.request_id)
-        payload = _stdout_payload(run)
-        exit_code = 0 if run["status"] in {"completed", "rejected"} else 1
+            payload = _stdout_payload(run)
+            exit_code = 0 if run["status"] in {"completed", "rejected"} else 1
     except CliUsageError as exc:
         payload = {
             "status": "failed",
@@ -79,6 +91,10 @@ def _run(workspace: Path, request_path: Path, package_path: Path | None) -> dict
         request["strategy_package"] = registered["package_ref"]
     submitted = client.submit_run(request)
     return RuntimeExecutor(client, worker).execute(str(submitted["run_id"]))
+
+
+def _preflight(workspace: Path, request_path: Path) -> dict[str, Any]:
+    return RuntimePreflight(WorkspaceClient(workspace)).preflight(_read_request(request_path))
 
 
 def _retry(workspace: Path, request_id: str) -> dict[str, Any]:

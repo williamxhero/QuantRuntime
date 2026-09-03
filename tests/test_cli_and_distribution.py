@@ -12,7 +12,7 @@ from test_executor_topologies import request, snapshot
 from quant_runtime import cli
 
 
-def test_cli_only_exposes_run_and_retry_with_strict_json_stdout(
+def test_cli_exposes_runtime_commands_with_strict_json_stdout(
     monkeypatch,
     tmp_path: Path,
     capsys,
@@ -20,7 +20,7 @@ def test_cli_only_exposes_run_and_retry_with_strict_json_stdout(
     choices = next(
         action for action in cli.build_parser()._actions if action.dest == "command"
     ).choices
-    assert set(choices) == {"run", "retry"}
+    assert set(choices) == {"preflight", "run", "retry"}
 
     class Executor:
         def __init__(self, client, worker):
@@ -70,6 +70,14 @@ def test_cli_only_exposes_run_and_retry_with_strict_json_stdout(
         "result": {"outcome": "completed"},
         "error": None,
     }
+
+
+def test_cli_exposes_side_effect_free_preflight() -> None:
+    choices = next(
+        action for action in cli.build_parser()._actions if action.dest == "command"
+    ).choices
+
+    assert set(choices) == {"preflight", "run", "retry"}
 
 
 @pytest.mark.parametrize(
