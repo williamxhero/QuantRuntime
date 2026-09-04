@@ -188,7 +188,7 @@ def test_wheel_contains_only_runtime_execution_ownership(tmp_path: Path) -> None
         names = set(archive.namelist())
         metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
         metadata = archive.read(metadata_name).decode()
-    assert "Requires-Dist: strategy-workspace" in metadata
+    assert "Requires-Dist: strategy-workspace<0.3,>=0.1.0" in metadata
     assert not any("quant_runtime/workspace/" in name for name in names)
     assert not any("quant_runtime/schemas/" in name for name in names)
     assert not any("candidate_manifest" in name or "formal_manifest" in name for name in names)
