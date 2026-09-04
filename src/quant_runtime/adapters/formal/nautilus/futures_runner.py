@@ -227,9 +227,7 @@ def run_futures_engine(
                     if dataset.partial_lineage is not None
                     else None
                 ),
-                "partial_stream_verified": isinstance(
-                    dataset.bars, ReplayablePartialFuturesBars
-                ),
+                "partial_stream_verified": isinstance(dataset.bars, ReplayablePartialFuturesBars),
                 "partial_stream_canonical_input_hash": (
                     dataset.bars.verification.get("canonical_input_hash")
                     if isinstance(dataset.bars, ReplayablePartialFuturesBars)

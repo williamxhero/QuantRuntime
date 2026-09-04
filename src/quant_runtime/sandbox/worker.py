@@ -174,9 +174,7 @@ def _conformance(protocol: dict[str, Any], result_path: Path) -> int:
         )
         return 0
     try:
-        conform = load_package_entrypoint(
-            Path("/sandbox/package"), str(config["entrypoint"])
-        )
+        conform = load_package_entrypoint(Path("/sandbox/package"), str(config["entrypoint"]))
         if not callable(conform):
             raise TypeError("package conformance entrypoint is not callable")
         traces: list[dict[str, Any]] = []
