@@ -102,8 +102,10 @@ def validate_binding(
         "binding_id",
     ):
         value = binding.get(name)
-        if not isinstance(value, str) or len(value) != 64 or any(
-            character not in "0123456789abcdef" for character in value
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
         ):
             raise TransportContractError("validation binding identity is invalid")
     if binding["request_sha256"] != sha256_value(request):

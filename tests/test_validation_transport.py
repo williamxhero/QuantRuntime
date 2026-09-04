@@ -40,9 +40,7 @@ def _binding(request: dict, preflight: dict) -> dict:
         b'{"value":',
     ],
 )
-def test_transport_rejects_noncanonical_or_malformed_input(
-    tmp_path: Path, content: bytes
-) -> None:
+def test_transport_rejects_noncanonical_or_malformed_input(tmp_path: Path, content: bytes) -> None:
     path = tmp_path / "input.json"
     path.write_bytes(content)
 
@@ -218,9 +216,7 @@ def test_frozen_transport_is_opened_once_and_execution_uses_in_memory_values(
 
     monkeypatch.setattr(cli, "read_transport_json", mutating_reader)
     monkeypatch.setattr(cli, "validate_frozen_transport", lambda draft, result: None)
-    monkeypatch.setattr(
-        cli, "validate_frozen_preflight", lambda client, draft, result: None
-    )
+    monkeypatch.setattr(cli, "validate_frozen_preflight", lambda client, draft, result: None)
     monkeypatch.setattr(cli, "WorkspaceClient", Client)
     monkeypatch.setattr(cli, "WorkspaceWorker", Worker)
     monkeypatch.setattr(cli, "RuntimeExecutor", Executor)

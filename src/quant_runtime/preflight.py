@@ -117,9 +117,11 @@ def validate_frozen_transport(
 
     value = _draft(draft)
     expected_result_fields = {"schema", "status", "frozen_snapshot", "evidence"}
-    if set(result) != expected_result_fields or result.get(
-        "schema"
-    ) != "quant-research.runtime-preflight-result.v1" or result.get("status") != "accepted":
+    if (
+        set(result) != expected_result_fields
+        or result.get("schema") != "quant-research.runtime-preflight-result.v1"
+        or result.get("status") != "accepted"
+    ):
         raise PreflightRequestError("frozen preflight result is invalid")
     snapshot = result.get("frozen_snapshot")
     evidence = result.get("evidence")
@@ -245,8 +247,10 @@ def _validate_frozen_snapshot_shape(snapshot: Mapping[str, Any]) -> None:
         raise PreflightRequestError("frozen snapshot verification fields are invalid")
     for name in ("canonical_input_hash", "catalog_hash", "calendar_hash", "coverage_hash"):
         identity = verification.get(name)
-        if not isinstance(identity, str) or len(identity) != 64 or any(
-            character not in "0123456789abcdef" for character in identity
+        if (
+            not isinstance(identity, str)
+            or len(identity) != 64
+            or any(character not in "0123456789abcdef" for character in identity)
         ):
             raise PreflightRequestError("frozen snapshot verification identity is invalid")
     if any(

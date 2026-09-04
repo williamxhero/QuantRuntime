@@ -294,19 +294,22 @@ def test_frozen_run_uses_existing_result_without_a_second_live_preflight(
     monkeypatch.setattr(cli, "validate_frozen_preflight", lambda client, draft, result: None)
     monkeypatch.setattr(cli, "validate_frozen_transport", lambda draft, result: None)
 
-    assert cli.main(
-        [
-            "run",
-            "--workspace",
-            str(tmp_path / "workspace"),
-            "--request",
-            str(request_path),
-            "--frozen-preflight",
-            str(result_path),
-            "--validation-binding",
-            str(binding_path),
-        ]
-    ) == 0
+    assert (
+        cli.main(
+            [
+                "run",
+                "--workspace",
+                str(tmp_path / "workspace"),
+                "--request",
+                str(request_path),
+                "--frozen-preflight",
+                str(result_path),
+                "--validation-binding",
+                str(binding_path),
+            ]
+        )
+        == 0
+    )
 
     assert json.loads(capsys.readouterr().out)["request_id"] == "run-1"
     assert events == ["submit", "execute"]

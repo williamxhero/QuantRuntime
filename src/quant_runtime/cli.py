@@ -157,9 +157,7 @@ def _run(
         client = WorkspaceClient(workspace)
         worker = WorkspaceWorker(workspace)
         validate_frozen_preflight(client, draft, prepared)
-        submitted = client.submit_run(
-            _canonical_run_request(draft, prepared["frozen_snapshot"])
-        )
+        submitted = client.submit_run(_canonical_run_request(draft, prepared["frozen_snapshot"]))
         return RuntimeExecutor(client, worker).execute(str(submitted["run_id"]))
     client = WorkspaceClient(workspace)
     worker = WorkspaceWorker(workspace)
