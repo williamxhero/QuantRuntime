@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "quant-runtime"
-version = "0.2.3"
+version = "0.2.4"
 description = "Qlib and Nautilus execution plane for Strategy Workspace"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

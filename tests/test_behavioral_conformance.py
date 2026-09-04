@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
 from conftest import PACKAGE
 from strategy_workspace import WorkspaceClient
 from test_preflight import draft as preflight_draft
@@ -10,6 +11,7 @@ from test_preflight import preflight
 from test_sandbox_policy import isolated_profile
 
 from quant_runtime.conformance import RuntimeConformance
+from quant_runtime.preflight import PreflightRequestError, validate_frozen_preflight
 
 DIMENSIONS = {
     name: {"status": "passed", "observed": "fixture"}
@@ -125,6 +127,17 @@ def test_behavioral_pass_publishes_one_identity_bound_non_formal_evidence(
     confirmed_preflight = preflight(tmp_path / "workspace", market_fixture).preflight(confirmed)
     assert confirmed_preflight["status"] == "accepted"
     assert confirmed_preflight["evidence"]["behavioral_conformance"] == reference
+    validate_frozen_preflight(client, confirmed, confirmed_preflight)
+
+    changed_parameters = deepcopy(confirmed)
+    changed_parameters["parameters"] = {"lookback": 99}
+    with pytest.raises(PreflightRequestError):
+        validate_frozen_preflight(client, changed_parameters, confirmed_preflight)
+
+    tampered_result = deepcopy(confirmed_preflight)
+    tampered_result["frozen_snapshot"]["verification"]["catalog_hash"] = "0" * 64
+    with pytest.raises(PreflightRequestError, match="snapshot identity"):
+        validate_frozen_preflight(client, confirmed, tampered_result)
     assert backend.calls == conformance_calls
     submitted = client.submit_run(
         {

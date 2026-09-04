@@ -8,10 +8,17 @@ from typing import Any, NoReturn
 
 from strategy_workspace import WorkspaceClient, WorkspaceWorker
 
+from quant_runtime import __version__
+from quant_runtime.artifacts import sha256_value
 from quant_runtime.conformance import RuntimeConformance
 from quant_runtime.executor import RuntimeExecutor
-from quant_runtime.preflight import RuntimePreflight
+from quant_runtime.preflight import (
+    RuntimePreflight,
+    validate_frozen_preflight,
+    validate_frozen_transport,
+)
 from quant_runtime.sandbox.oci import OciSandboxBackend, OciSandboxConfig
+from quant_runtime.transport import read_transport_json, validate_binding
 
 DEFAULT_WORKSPACE = Path(r"D:\WILL\STOCK\QuantResearch\runtime\workspace")
 
@@ -28,6 +35,8 @@ class JsonArgumentParser(argparse.ArgumentParser):
 def build_parser() -> argparse.ArgumentParser:
     parser = JsonArgumentParser(prog="quant-runtime")
     commands = parser.add_subparsers(dest="command", required=True)
+
+    commands.add_parser("capabilities", help="print immutable CLI transport capabilities")
 
     preflight = commands.add_parser(
         "preflight", help="validate and freeze a draft request without submitting a Workspace run"
@@ -50,6 +59,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     run.add_argument("--package", type=Path)
     run.add_argument("--request", type=Path, required=True)
+    run.add_argument("--frozen-preflight", type=Path)
+    run.add_argument("--validation-binding", type=Path)
 
     retry = commands.add_parser("retry", help="create and execute a new attempt for a failed run")
     retry.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
@@ -60,7 +71,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     try:
         arguments = build_parser().parse_args(argv)
-        if arguments.command == "preflight":
+        if arguments.command == "capabilities":
+            payload = runtime_capabilities()
+            exit_code = 0
+        elif arguments.command == "preflight":
             payload = _preflight(arguments.workspace, arguments.request)
             exit_code = 0 if payload["status"] == "accepted" else 1
         elif arguments.command == "conformance":
@@ -70,7 +84,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             payload = OciSandboxBackend(OciSandboxConfig(image=arguments.image)).capability_proof()
             exit_code = 0
         elif arguments.command == "run":
-            run = _run(arguments.workspace, arguments.request, arguments.package)
+            run = _run(
+                arguments.workspace,
+                arguments.request,
+                arguments.package,
+                frozen_preflight_path=arguments.frozen_preflight,
+                validation_binding_path=arguments.validation_binding,
+            )
             payload = _stdout_payload(run)
             exit_code = 0 if run["status"] in {"completed", "rejected"} else 1
         else:
@@ -101,7 +121,46 @@ def main(argv: Sequence[str] | None = None) -> int:
     return exit_code
 
 
-def _run(workspace: Path, request_path: Path, package_path: Path | None) -> dict[str, Any]:
+def runtime_capabilities() -> dict[str, Any]:
+    identity = {
+        "schema": "quant-runtime.cli-capabilities.v1",
+        "status": "ok",
+        "runtime_version": __version__,
+        "cli_protocol": "quant-runtime.cli.v1",
+        "capabilities": ["frozen-preflight.v1", "preflight.v1", "run.v1"],
+    }
+    return {**identity, "capability_id": sha256_value(identity)}
+
+
+def _run(
+    workspace: Path,
+    request_path: Path,
+    package_path: Path | None,
+    *,
+    frozen_preflight_path: Path | None = None,
+    validation_binding_path: Path | None = None,
+) -> dict[str, Any]:
+    frozen = frozen_preflight_path is not None
+    if frozen != (validation_binding_path is not None):
+        raise ValueError("frozen preflight and validation binding must be supplied together")
+    if frozen:
+        assert frozen_preflight_path is not None
+        assert validation_binding_path is not None
+        if package_path is not None:
+            raise ValueError("frozen execution cannot register a package")
+        draft = read_transport_json(request_path)
+        prepared = read_transport_json(frozen_preflight_path)
+        binding = read_transport_json(validation_binding_path)
+        capability = runtime_capabilities()
+        validate_binding(binding, draft, prepared, str(capability["capability_id"]))
+        validate_frozen_transport(draft, prepared)
+        client = WorkspaceClient(workspace)
+        worker = WorkspaceWorker(workspace)
+        validate_frozen_preflight(client, draft, prepared)
+        submitted = client.submit_run(
+            _canonical_run_request(draft, prepared["frozen_snapshot"])
+        )
+        return RuntimeExecutor(client, worker).execute(str(submitted["run_id"]))
     client = WorkspaceClient(workspace)
     worker = WorkspaceWorker(workspace)
     draft = _read_request(request_path)

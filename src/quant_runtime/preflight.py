@@ -11,6 +11,7 @@ from quant_runtime.adapters.data.markethub import (
     MarketHubDataAdapter,
     SnapshotRequest,
 )
+from quant_runtime.adapters.data.markethub.contract import validate_snapshot_manifest
 from quant_runtime.artifacts import sha256_value
 from quant_runtime.capabilities import AdapterRegistry
 from quant_runtime.materialization import VerifiedPackageMaterializer
@@ -48,39 +49,18 @@ class RuntimePreflight:
     def preflight(self, draft: Mapping[str, Any]) -> dict[str, Any]:
         try:
             value = _draft(draft)
-            package_record = self.client.get_registered_package(value["strategy_package"])
-            if value["schema"] in {
-                "quant-research.runtime-preflight-request.v2",
-                "quant-research.runtime-preflight-request.v3",
-            }:
-                resolved = self.policy_registry.resolve(package_record, value["sandbox_profile"])
-                _verify_conformance(self.client, package_record, value, resolved.identity_hash)
             snapshot_value = _snapshot_request(value["snapshot_request"])
             request = SnapshotRequest.from_dict(snapshot_value)
+            _validate_local_request(
+                self.client, self.registry, self.policy_registry, value, request
+            )
             required_semantics = _required_semantics(snapshot_value)
             as_of = _as_of(snapshot_value)
-            with TemporaryDirectory(prefix="quant-runtime-preflight-") as temporary:
-                package = VerifiedPackageMaterializer(self.client).materialize(
-                    package_record,
-                    Path(temporary) / "package",
-                )
-                if package.frequencies and request.frequency not in package.frequencies:
-                    raise PreflightRequestError(
-                        "strategy package does not support MarketHub frequency "
-                        f"{request.frequency!r}"
-                    )
-                self.registry.resolve_plan(
-                    value["execution"],
-                    required=package.requirements,
-                    discovery_policy=package.discovery_policy,
-                    discovery_implementations=package.implementations("discovery"),
-                    formal_implementations=package.implementations("formal"),
-                )
-                frozen_snapshot = self.data_adapter.freeze_reference(
-                    request,
-                    as_of=as_of,
-                    required_semantics=required_semantics,
-                )
+            frozen_snapshot = self.data_adapter.freeze_reference(
+                request,
+                as_of=as_of,
+                required_semantics=required_semantics,
+            )
             return {
                 "schema": "quant-research.runtime-preflight-result.v1",
                 "status": "accepted",
@@ -110,6 +90,212 @@ class RuntimePreflight:
             return _failure(classification, "markethub_preflight_failed", message)
         except Exception as exc:
             return _failure("request_invalid", "preflight_validation_failed", str(exc))
+
+
+def validate_frozen_preflight(
+    client: WorkspacePreflightClientPort,
+    draft: Mapping[str, Any],
+    result: Mapping[str, Any],
+    *,
+    registry: AdapterRegistry | None = None,
+    policy_registry: SandboxPolicyRegistry | None = None,
+) -> None:
+    value, request = validate_frozen_transport(draft, result)
+    _validate_local_request(
+        client,
+        registry or production_registry(),
+        policy_registry or SandboxPolicyRegistry(),
+        value,
+        request,
+    )
+
+
+def validate_frozen_transport(
+    draft: Mapping[str, Any], result: Mapping[str, Any]
+) -> tuple[dict[str, Any], SnapshotRequest]:
+    """Validate frozen transport integrity without touching any external owner."""
+
+    value = _draft(draft)
+    expected_result_fields = {"schema", "status", "frozen_snapshot", "evidence"}
+    if set(result) != expected_result_fields or result.get(
+        "schema"
+    ) != "quant-research.runtime-preflight-result.v1" or result.get("status") != "accepted":
+        raise PreflightRequestError("frozen preflight result is invalid")
+    snapshot = result.get("frozen_snapshot")
+    evidence = result.get("evidence")
+    if not isinstance(snapshot, Mapping) or not isinstance(evidence, Mapping):
+        raise PreflightRequestError("frozen preflight content is invalid")
+    snapshot_value = {str(key): item for key, item in snapshot.items()}
+    validate_snapshot_manifest(snapshot_value)
+    _validate_frozen_snapshot_shape(snapshot_value)
+    snapshot_identity = {
+        "schema": "strategy-workspace.market-snapshot-request.v1",
+        "source": snapshot.get("source"),
+        "query": snapshot.get("query"),
+        "calendar": snapshot.get("calendar"),
+        "contract_mapping": snapshot.get("contract_mapping"),
+        "trust_policy": snapshot.get("trust_policy"),
+        "as_of": snapshot.get("as_of"),
+        "required_semantics": snapshot.get("required_semantics"),
+        "data_semantics": snapshot.get("data_semantics"),
+        "verification": snapshot.get("verification"),
+    }
+    if snapshot.get("snapshot_id") != f"sha256:{sha256_value(snapshot_identity)}":
+        raise PreflightRequestError("frozen snapshot identity is invalid")
+    request_value = _snapshot_request(value["snapshot_request"])
+    request = SnapshotRequest.from_dict(request_value)
+    source = snapshot.get("source")
+    query = snapshot.get("query")
+    if not isinstance(source, Mapping) or not isinstance(query, Mapping):
+        raise PreflightRequestError("frozen snapshot source or query is invalid")
+    request_identity = request.identity_payload()
+    expected_source = request_identity["source"]
+    expected_query = request_identity["query"]
+    if (
+        set(source) != set(expected_source) | {"adapter_version", "data_revision"}
+        or any(source.get(key) != item for key, item in expected_source.items())
+        or source.get("adapter_version") != MarketHubDataAdapter.adapter_version
+        or not isinstance(source.get("data_revision"), str)
+        or not source.get("data_revision")
+        or dict(query) != expected_query
+        or snapshot.get("calendar") != request.calendar
+        or snapshot.get("contract_mapping") != request.contract_mapping
+        or snapshot.get("as_of") != _as_of(request_value)
+        or snapshot.get("required_semantics") != list(_required_semantics(request_value))
+    ):
+        raise PreflightRequestError("frozen snapshot does not match the request")
+    required_evidence = {
+        "strategy_package",
+        "verification",
+        "data_semantics",
+        "behavioral_conformance",
+    }
+    if set(evidence) != required_evidence:
+        raise PreflightRequestError("frozen preflight evidence fields are invalid")
+    if (
+        evidence.get("strategy_package") != value["strategy_package"]
+        or evidence.get("verification") != snapshot.get("verification")
+        or evidence.get("data_semantics") != snapshot.get("data_semantics")
+        or evidence.get("behavioral_conformance") != value["behavioral_conformance"]
+    ):
+        raise PreflightRequestError("frozen preflight evidence does not match the request")
+    return value, request
+
+
+def _validate_frozen_snapshot_shape(snapshot: Mapping[str, Any]) -> None:
+    expected = {
+        "schema",
+        "snapshot_id",
+        "mode",
+        "trust_policy",
+        "source",
+        "query",
+        "calendar",
+        "contract_mapping",
+        "as_of",
+        "required_semantics",
+        "data_semantics",
+        "verification",
+        "resolved_at",
+    }
+    if (
+        set(snapshot) != expected
+        or snapshot.get("schema") != "quant-research.market-snapshot-ref.v2"
+        or snapshot.get("mode") != "reference"
+        or snapshot.get("trust_policy") != "verified_immutable"
+    ):
+        raise PreflightRequestError("frozen snapshot fields are invalid")
+    source = snapshot.get("source")
+    query = snapshot.get("query")
+    semantics = snapshot.get("data_semantics")
+    verification = snapshot.get("verification")
+    if not all(isinstance(value, Mapping) for value in (source, query, semantics, verification)):
+        raise PreflightRequestError("frozen snapshot objects are invalid")
+    assert isinstance(source, Mapping)
+    assert isinstance(query, Mapping)
+    assert isinstance(semantics, Mapping)
+    assert isinstance(verification, Mapping)
+    source_fields = {"adapter", "adapter_version", "endpoint_contract", "base_url", "data_revision"}
+    if "partial_publication" in source:
+        source_fields.add("partial_publication")
+    if set(source) != source_fields:
+        raise PreflightRequestError("frozen snapshot source fields are invalid")
+    if set(query) != {"instruments", "start", "end", "frequency", "adjustment"}:
+        raise PreflightRequestError("frozen snapshot query fields are invalid")
+    semantic_names = {"field_availability", "point_in_time", "time", "provider_lineage"}
+    if set(semantics) != semantic_names:
+        raise PreflightRequestError("frozen snapshot data semantics are invalid")
+    for observation in semantics.values():
+        if (
+            not isinstance(observation, Mapping)
+            or set(observation) != {"status", "reason"}
+            or observation.get("status") not in {"verified", "not_evaluated"}
+            or not isinstance(observation.get("reason"), str)
+        ):
+            raise PreflightRequestError("frozen snapshot data semantics are invalid")
+    verification_fields = {
+        "canonical_input_hash",
+        "data_version",
+        "dataset_version",
+        "catalog_hash",
+        "calendar_hash",
+        "coverage_hash",
+    }
+    if set(verification) != verification_fields:
+        raise PreflightRequestError("frozen snapshot verification fields are invalid")
+    for name in ("canonical_input_hash", "catalog_hash", "calendar_hash", "coverage_hash"):
+        identity = verification.get(name)
+        if not isinstance(identity, str) or len(identity) != 64 or any(
+            character not in "0123456789abcdef" for character in identity
+        ):
+            raise PreflightRequestError("frozen snapshot verification identity is invalid")
+    if any(
+        not isinstance(verification.get(name), str) or not verification[name]
+        for name in ("data_version", "dataset_version")
+    ):
+        raise PreflightRequestError("frozen snapshot verification version is invalid")
+    resolved_at = snapshot.get("resolved_at")
+    if not isinstance(resolved_at, str) or not resolved_at.endswith("Z"):
+        raise PreflightRequestError("frozen snapshot resolution time is invalid")
+    try:
+        datetime.fromisoformat(resolved_at.removesuffix("Z") + "+00:00")
+    except ValueError as exc:
+        raise PreflightRequestError("frozen snapshot resolution time is invalid") from exc
+
+
+def _validate_local_request(
+    client: WorkspacePreflightClientPort,
+    registry: AdapterRegistry,
+    policy_registry: SandboxPolicyRegistry,
+    value: Mapping[str, Any],
+    request: SnapshotRequest,
+) -> dict[str, Any]:
+    package_record = client.get_registered_package(value["strategy_package"])
+    if value["schema"] in {
+        "quant-research.runtime-preflight-request.v2",
+        "quant-research.runtime-preflight-request.v3",
+    }:
+        resolved = policy_registry.resolve(package_record, value["sandbox_profile"])
+        _verify_conformance(client, package_record, value, resolved.identity_hash)
+    _required_semantics(value["snapshot_request"])
+    _as_of(value["snapshot_request"])
+    with TemporaryDirectory(prefix="quant-runtime-preflight-") as temporary:
+        package = VerifiedPackageMaterializer(client).materialize(
+            package_record,
+            Path(temporary) / "package",
+        )
+        if package.frequencies and request.frequency not in package.frequencies:
+            raise PreflightRequestError(
+                f"strategy package does not support MarketHub frequency {request.frequency!r}"
+            )
+        registry.resolve_plan(
+            value["execution"],
+            required=package.requirements,
+            discovery_policy=package.discovery_policy,
+            discovery_implementations=package.implementations("discovery"),
+            formal_implementations=package.implementations("formal"),
+        )
+    return package_record
 
 
 def _draft(value: Mapping[str, Any]) -> dict[str, Any]:
