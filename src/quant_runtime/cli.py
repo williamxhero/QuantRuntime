@@ -141,7 +141,10 @@ def _conformance(workspace: Path, request_path: Path) -> dict[str, Any]:
 def _canonical_run_request(draft: dict[str, Any], frozen_snapshot: Any) -> dict[str, Any]:
     if not isinstance(frozen_snapshot, dict):
         raise ValueError("accepted preflight lacks a frozen snapshot")
-    sandboxed = draft.get("schema") == "quant-research.runtime-preflight-request.v2"
+    sandboxed = draft.get("schema") in {
+        "quant-research.runtime-preflight-request.v2",
+        "quant-research.runtime-preflight-request.v3",
+    }
     request = {
         "schema": (
             "quant-research.workspace-run-request.v4"

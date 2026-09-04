@@ -109,6 +109,7 @@ def test_behavioral_pass_publishes_one_identity_bound_non_formal_evidence(
 
     replay = RuntimeConformance(client, backend=backend).conform(request)
     assert replay["behavioral_conformance"] == reference
+    conformance_calls = backend.calls
 
     run_draft = preflight_draft(package["package_ref"])
     run_draft.update(
@@ -120,6 +121,11 @@ def test_behavioral_pass_publishes_one_identity_bound_non_formal_evidence(
     )
     prepared = preflight(tmp_path / "workspace", market_fixture).preflight(run_draft)
     assert prepared["status"] == "accepted"
+    confirmed = {**run_draft, "schema": "quant-research.runtime-preflight-request.v3"}
+    confirmed_preflight = preflight(tmp_path / "workspace", market_fixture).preflight(confirmed)
+    assert confirmed_preflight["status"] == "accepted"
+    assert confirmed_preflight["evidence"]["behavioral_conformance"] == reference
+    assert backend.calls == conformance_calls
     submitted = client.submit_run(
         {
             "schema": "quant-research.workspace-run-request.v4",

@@ -49,7 +49,10 @@ class RuntimePreflight:
         try:
             value = _draft(draft)
             package_record = self.client.get_registered_package(value["strategy_package"])
-            if value["schema"] == "quant-research.runtime-preflight-request.v2":
+            if value["schema"] in {
+                "quant-research.runtime-preflight-request.v2",
+                "quant-research.runtime-preflight-request.v3",
+            }:
                 resolved = self.policy_registry.resolve(package_record, value["sandbox_profile"])
                 _verify_conformance(self.client, package_record, value, resolved.identity_hash)
             snapshot_value = _snapshot_request(value["snapshot_request"])
@@ -88,7 +91,11 @@ class RuntimePreflight:
                     "data_semantics": frozen_snapshot["data_semantics"],
                     **(
                         {"behavioral_conformance": value["behavioral_conformance"]}
-                        if value["schema"] == "quant-research.runtime-preflight-request.v2"
+                        if value["schema"]
+                        in {
+                            "quant-research.runtime-preflight-request.v2",
+                            "quant-research.runtime-preflight-request.v3",
+                        }
                         else {}
                     ),
                 },
@@ -120,11 +127,19 @@ def _draft(value: Mapping[str, Any]) -> dict[str, Any]:
     if draft["schema"] not in {
         "quant-research.runtime-preflight-request.v1",
         "quant-research.runtime-preflight-request.v2",
+        "quant-research.runtime-preflight-request.v3",
     }:
         raise PreflightRequestError("preflight draft schema is invalid")
     if draft["schema"].endswith(".v1") and set(draft) != base:
         raise PreflightRequestError("legacy preflight draft cannot carry sandbox fields")
-    if draft["schema"].endswith(".v2") and set(draft) != base | sandboxed:
+    if (
+        draft["schema"]
+        in {
+            "quant-research.runtime-preflight-request.v2",
+            "quant-research.runtime-preflight-request.v3",
+        }
+        and set(draft) != base | sandboxed
+    ):
         raise PreflightRequestError("sandboxed preflight draft lacks conformance fields")
     if not isinstance(draft["strategy_package"], Mapping):
         raise PreflightRequestError("preflight draft strategy_package must be an object")
@@ -139,7 +154,10 @@ def _draft(value: Mapping[str, Any]) -> dict[str, Any]:
         "parameters": dict(draft["parameters"]),
         "execution": dict(draft["execution"]),
     }
-    if draft["schema"].endswith(".v2"):
+    if draft["schema"] in {
+        "quant-research.runtime-preflight-request.v2",
+        "quant-research.runtime-preflight-request.v3",
+    }:
         if not isinstance(draft["sandbox_profile"], Mapping) or not isinstance(
             draft["behavioral_conformance"], Mapping
         ):
