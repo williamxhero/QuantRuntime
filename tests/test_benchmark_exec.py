@@ -56,6 +56,11 @@ def _write_inputs(root: Path, *, mode: str = "contract_fake") -> tuple[Path, Pat
         },
         "entrypoint": "factor.py:evaluate",
         "sandbox_profile": {},
+        "transport_limits": {
+            "source_bytes": 16_384,
+            "fixture_bytes": 16_384,
+            "result_bytes": 1_048_576,
+        },
     }
     request.write_text(json.dumps({**body, "invocation_id": sha256_value(body)}), encoding="utf-8")
     return request, source, fixture

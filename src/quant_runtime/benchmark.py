@@ -47,10 +47,11 @@ class BenchmarkExecutionService:
 
     def execute(self, request_path: Path, source_path: Path, fixture_path: Path) -> dict[str, Any]:
         request = _request(read_transport_json(request_path))
+        limits = request["transport_limits"]
         source_identity = _blob_identity(request["source"], "text/x-python")
         fixture_identity = _blob_identity(request["fixture"], "application/json")
-        source = _read_blob(source_path, source_identity, "source", MAX_SOURCE_BYTES)
-        fixture = _read_blob(fixture_path, fixture_identity, "fixture", MAX_FIXTURE_BYTES)
+        source = _read_blob(source_path, source_identity, "source", limits["source_bytes"])
+        fixture = _read_blob(fixture_path, fixture_identity, "fixture", limits["fixture_bytes"])
         _strict_json_object(fixture, label="benchmark fixture")
         if request["execution_mode"] == "production_attested_oci" and not isinstance(
             self._backend, OciSandboxBackend
@@ -94,7 +95,11 @@ class BenchmarkExecutionService:
                 output=output,
                 cancellation=CancellationToken(),
             )
-            result = _worker_result(self._backend.invoke(prepared), protocol["invocation_id"])
+            result = _worker_result(
+                self._backend.invoke(prepared),
+                protocol["invocation_id"],
+                limits["result_bytes"],
+            )
         status = "completed" if result["classification"] == "success" else "failed"
         identity = {
             "schema": "quant-runtime.benchmark-exec-result.v1",
@@ -117,6 +122,7 @@ def _request(value: dict[str, Any]) -> dict[str, Any]:
         "fixture",
         "entrypoint",
         "sandbox_profile",
+        "transport_limits",
     }
     if set(value) != required or value.get("schema") != "quant-runtime.benchmark-exec-request.v1":
         raise TransportContractError("benchmark execution request fields are invalid")
@@ -134,6 +140,19 @@ def _request(value: dict[str, Any]) -> dict[str, Any]:
         raise TransportContractError("benchmark entrypoint must be a single transport filename")
     if not isinstance(value.get("sandbox_profile"), dict):
         raise TransportContractError("benchmark sandbox profile must be an object")
+    limits = value.get("transport_limits")
+    if (
+        not isinstance(limits, dict)
+        or set(limits) != {"source_bytes", "fixture_bytes", "result_bytes"}
+        or any(
+            not isinstance(item, int) or isinstance(item, bool) or item < 1
+            for item in limits.values()
+        )
+        or limits["source_bytes"] > MAX_SOURCE_BYTES
+        or limits["fixture_bytes"] > MAX_FIXTURE_BYTES
+        or limits["result_bytes"] > MAX_RESULT_BYTES
+    ):
+        raise TransportContractError("benchmark transport limits are invalid")
     identity = {key: item for key, item in value.items() if key != "invocation_id"}
     if value.get("invocation_id") != sha256_value(identity):
         raise TransportContractError("benchmark execution request identity mismatch")
@@ -214,7 +233,9 @@ def _strict_json_object(content: bytes, *, label: str) -> dict[str, Any]:
     return parsed
 
 
-def _worker_result(value: Mapping[str, Any], invocation_id: str) -> dict[str, Any]:
+def _worker_result(
+    value: Mapping[str, Any], invocation_id: str, maximum_bytes: int
+) -> dict[str, Any]:
     mapped = {str(key): item for key, item in value.items()}
     try:
         encoded = json.dumps(mapped, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
@@ -222,7 +243,7 @@ def _worker_result(value: Mapping[str, Any], invocation_id: str) -> dict[str, An
         )
     except (TypeError, ValueError, RecursionError) as exc:
         raise TransportContractError("benchmark sandbox result is invalid") from exc
-    if len(encoded) > MAX_RESULT_BYTES:
+    if len(encoded) > maximum_bytes:
         raise TransportContractError("benchmark sandbox result must be bounded")
     required = {"schema", "invocation_id", "classification", "payload", "sandbox"}
     if (
