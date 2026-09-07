@@ -1,4 +1,4 @@
-"""Strict transport-only execution for external factor-research benchmarks."""
+"""Strict transport-only execution for external research benchmarks."""
 
 from __future__ import annotations
 
@@ -49,14 +49,17 @@ class BenchmarkExecutionService:
         request = _request(read_transport_json(request_path))
         limits = request["transport_limits"]
         source_identity = _blob_identity(request["source"], "text/x-python")
-        fixture_identity = _blob_identity(request["fixture"], "application/json")
+        strategy_trace = request["schema"] == "quant-runtime.benchmark-exec-request.v2"
+        input_name = "scenario" if strategy_trace else "fixture"
+        input_limit = "scenario_bytes" if strategy_trace else "fixture_bytes"
+        fixture_identity = _blob_identity(request[input_name], "application/json")
         source = _read_blob(source_path, source_identity, "source", limits["source_bytes"])
-        fixture = _read_blob(fixture_path, fixture_identity, "fixture", limits["fixture_bytes"])
-        _strict_json_object(fixture, label="benchmark fixture")
+        fixture = _read_blob(fixture_path, fixture_identity, input_name, limits[input_limit])
+        _strict_json_object(fixture, label=f"benchmark {input_name}")
         if request["execution_mode"] == "production_attested_oci" and not isinstance(
             self._backend, OciSandboxBackend
         ):
-            return _blocked(str(request["invocation_id"]), "benchmark_oci_unavailable")
+            return _blocked(request, "benchmark_oci_unavailable")
         entrypoint = str(request["entrypoint"])
         filename, _separator, callable_name = entrypoint.partition(":")
         with TemporaryDirectory(prefix="quant-runtime-benchmark-") as temporary:
@@ -68,13 +71,14 @@ class BenchmarkExecutionService:
             inputs.mkdir()
             output.mkdir()
             (code_root / filename).write_bytes(source)
-            (inputs / "fixture.json").write_bytes(fixture)
+            input_filename = "scenario.json" if strategy_trace else "fixture.json"
+            (inputs / input_filename).write_bytes(fixture)
             protocol_identity = {
                 "schema": "quant-runtime.sandbox-invocation.v1",
-                "phase": "benchmark_factor",
+                "phase": "benchmark_strategy" if strategy_trace else "benchmark_factor",
                 "benchmark_request_id": request["invocation_id"],
                 "source": request["source"],
-                "fixture": request["fixture"],
+                input_name: request[input_name],
                 "entrypoint": entrypoint,
                 "callable": callable_name,
                 "sandbox_profile": request["sandbox_profile"],
@@ -84,6 +88,8 @@ class BenchmarkExecutionService:
                     "output": "/sandbox/output",
                 },
             }
+            if strategy_trace:
+                protocol_identity["workload_kind"] = request["workload_kind"]
             protocol = {
                 **protocol_identity,
                 "invocation_id": "sha256:" + sha256_value(protocol_identity),
@@ -102,7 +108,11 @@ class BenchmarkExecutionService:
             )
         status = "completed" if result["classification"] == "success" else "failed"
         identity = {
-            "schema": "quant-runtime.benchmark-exec-result.v1",
+            "schema": (
+                "quant-runtime.benchmark-exec-result.v2"
+                if strategy_trace
+                else "quant-runtime.benchmark-exec-result.v1"
+            ),
             "status": status,
             "benchmark_invocation_id": request["invocation_id"],
             "sandbox_invocation_id": protocol["invocation_id"],
@@ -114,17 +124,27 @@ class BenchmarkExecutionService:
 
 
 def _request(value: dict[str, Any]) -> dict[str, Any]:
-    required = {
+    schema = value.get("schema")
+    common = {
         "schema",
         "invocation_id",
         "execution_mode",
         "source",
-        "fixture",
         "entrypoint",
         "sandbox_profile",
         "transport_limits",
     }
-    if set(value) != required or value.get("schema") != "quant-runtime.benchmark-exec-request.v1":
+    if schema == "quant-runtime.benchmark-exec-request.v1":
+        required = common | {"fixture"}
+        input_limit = "fixture_bytes"
+    elif schema == "quant-runtime.benchmark-exec-request.v2":
+        required = common | {"workload_kind", "scenario"}
+        input_limit = "scenario_bytes"
+        if value.get("workload_kind") != "strategy_event_trace":
+            raise TransportContractError("benchmark workload kind is invalid")
+    else:
+        raise TransportContractError("benchmark execution request fields are invalid")
+    if set(value) != required:
         raise TransportContractError("benchmark execution request fields are invalid")
     if value.get("execution_mode") not in {"contract_fake", "production_attested_oci"}:
         raise TransportContractError("benchmark execution mode is invalid")
@@ -143,13 +163,13 @@ def _request(value: dict[str, Any]) -> dict[str, Any]:
     limits = value.get("transport_limits")
     if (
         not isinstance(limits, dict)
-        or set(limits) != {"source_bytes", "fixture_bytes", "result_bytes"}
+        or set(limits) != {"source_bytes", input_limit, "result_bytes"}
         or any(
             not isinstance(item, int) or isinstance(item, bool) or item < 1
             for item in limits.values()
         )
         or limits["source_bytes"] > MAX_SOURCE_BYTES
-        or limits["fixture_bytes"] > MAX_FIXTURE_BYTES
+        or limits[input_limit] > MAX_FIXTURE_BYTES
         or limits["result_bytes"] > MAX_RESULT_BYTES
     ):
         raise TransportContractError("benchmark transport limits are invalid")
@@ -267,11 +287,15 @@ def _worker_result(
     return mapped
 
 
-def _blocked(invocation_id: str, code: str) -> dict[str, Any]:
+def _blocked(request: dict[str, Any], code: str) -> dict[str, Any]:
     identity = {
-        "schema": "quant-runtime.benchmark-exec-result.v1",
+        "schema": (
+            "quant-runtime.benchmark-exec-result.v2"
+            if request["schema"] == "quant-runtime.benchmark-exec-request.v2"
+            else "quant-runtime.benchmark-exec-result.v1"
+        ),
         "status": "blocked",
-        "benchmark_invocation_id": invocation_id,
+        "benchmark_invocation_id": request["invocation_id"],
         "sandbox_invocation_id": None,
         "classification": "policy_rejection",
         "payload": None,

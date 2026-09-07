@@ -142,6 +142,7 @@ def runtime_capabilities() -> dict[str, Any]:
         "cli_protocol": "quant-runtime.cli.v1",
         "capabilities": [
             "benchmark-exec.v1",
+            "benchmark-exec.v2",
             "frozen-preflight.v1",
             "preflight.v1",
             "run.v1",

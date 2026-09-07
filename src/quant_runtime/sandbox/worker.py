@@ -53,6 +53,8 @@ def _candidate(arguments: list[str]) -> int:
         return _formal(protocol, result_path)
     if protocol.get("phase") == "benchmark_factor":
         return _benchmark_factor(protocol, result_path)
+    if protocol.get("phase") == "benchmark_strategy":
+        return _benchmark_strategy(protocol, result_path)
     if protocol.get("phase") != "sandbox_probe":
         _write(result_path, _result(protocol, "policy_rejection", {"code": "worker_phase_invalid"}))
         return 0
@@ -218,6 +220,111 @@ def _benchmark_factor(protocol: dict[str, Any], result_path: Path) -> int:
         _result(protocol, "success", {"compiled": True, "outputs": outputs}),
     )
     return 0
+
+
+def _benchmark_strategy(protocol: dict[str, Any], result_path: Path) -> int:
+    """Execute one content-bound strategy trace without interpreting its semantics."""
+
+    from quant_runtime.artifacts import sha256_bytes
+    from quant_runtime.entrypoint import load_package_entrypoint
+
+    source_identity = protocol.get("source")
+    scenario_identity = protocol.get("scenario")
+    entrypoint = protocol.get("entrypoint")
+    try:
+        if protocol.get("workload_kind") != "strategy_event_trace" or not isinstance(
+            entrypoint, str
+        ):
+            raise ValueError("strategy benchmark protocol is invalid")
+        source = Path("/sandbox/package") / entrypoint.partition(":")[0]
+        scenario_path = Path("/sandbox/inputs/scenario.json")
+        source_bytes = source.read_bytes()
+        scenario_bytes = scenario_path.read_bytes()
+        if not (
+            isinstance(source_identity, dict)
+            and isinstance(scenario_identity, dict)
+            and len(source_bytes) == source_identity.get("bytes")
+            and sha256_bytes(source_bytes) == source_identity.get("sha256")
+            and len(scenario_bytes) == scenario_identity.get("bytes")
+            and sha256_bytes(scenario_bytes) == scenario_identity.get("sha256")
+        ):
+            raise ValueError("strategy benchmark transport identity mismatch")
+        scenario = _read(scenario_path)
+    except Exception:
+        _write(
+            result_path,
+            _result(
+                protocol,
+                "policy_rejection",
+                {"compiled": False, "code": "benchmark_transport_rejected"},
+            ),
+        )
+        return 0
+    try:
+        evaluate = load_package_entrypoint(Path("/sandbox/package"), entrypoint)
+        if not callable(evaluate):
+            raise TypeError("strategy benchmark entrypoint is not callable")
+    except Exception:
+        _write(
+            result_path,
+            _result(
+                protocol,
+                "strategy_rejection",
+                {"compiled": False, "code": "benchmark_compile_rejected"},
+            ),
+        )
+        return 0
+    try:
+        events = evaluate(scenario)
+        _validate_strategy_events(events)
+    except Exception as exc:
+        classification = "strategy_rejection" if _originated_in_package(exc) else "policy_rejection"
+        _write(
+            result_path,
+            _result(
+                protocol,
+                classification,
+                {"compiled": True, "code": "benchmark_execution_rejected"},
+            ),
+        )
+        return 0
+    _write(
+        result_path,
+        _result(protocol, "success", {"compiled": True, "events": events}),
+    )
+    return 0
+
+
+def _validate_strategy_events(value: Any) -> None:
+    if not isinstance(value, list) or len(value) > 10_000:
+        raise ValueError("strategy benchmark events must be a bounded list")
+    previous = -1
+    for event in value:
+        if not isinstance(event, dict) or set(event) != {
+            "kind",
+            "index",
+            "action",
+            "quantity",
+            "state",
+        }:
+            raise ValueError("strategy benchmark event fields are invalid")
+        index = event.get("index")
+        quantity = event.get("quantity")
+        if (
+            event.get("kind") not in {"decision", "order", "state"}
+            or not isinstance(index, int)
+            or isinstance(index, bool)
+            or index < previous
+            or event.get("action") not in {"buy", "sell", "hold", "set_state"}
+            or not isinstance(quantity, int | float)
+            or isinstance(quantity, bool)
+            or not math.isfinite(float(quantity))
+            or float(quantity) < 0.0
+            or not isinstance(event.get("state"), str)
+            or len(event["state"]) > 128
+        ):
+            raise ValueError("strategy benchmark event is invalid")
+        previous = index
 
 
 def _assert_finite_json(value: Any) -> None:
