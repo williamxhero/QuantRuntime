@@ -64,6 +64,7 @@ def test_cli_exposes_runtime_commands_with_strict_json_stdout(
         action for action in cli.build_parser()._actions if action.dest == "command"
     ).choices
     assert set(choices) == {
+        "benchmark-exec",
         "capabilities",
         "conformance",
         "preflight",
@@ -153,6 +154,7 @@ def test_cli_exposes_side_effect_free_preflight() -> None:
     ).choices
 
     assert set(choices) == {
+        "benchmark-exec",
         "capabilities",
         "conformance",
         "preflight",
