@@ -10,6 +10,7 @@ from strategy_workspace import WorkspaceClient, WorkspaceWorker
 
 from quant_runtime import __version__
 from quant_runtime.artifacts import sha256_value
+from quant_runtime.benchmark import BenchmarkExecutionService
 from quant_runtime.conformance import RuntimeConformance
 from quant_runtime.executor import RuntimeExecutor
 from quant_runtime.preflight import (
@@ -17,7 +18,7 @@ from quant_runtime.preflight import (
     validate_frozen_preflight,
     validate_frozen_transport,
 )
-from quant_runtime.sandbox.oci import OciSandboxBackend, OciSandboxConfig
+from quant_runtime.sandbox.oci import OciSandboxBackend, OciSandboxConfig, production_backend
 from quant_runtime.transport import read_transport_json, validate_binding
 
 DEFAULT_WORKSPACE = Path(r"D:\WILL\STOCK\QuantResearch\runtime\workspace")
@@ -55,6 +56,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sandbox_proof.add_argument("--image", required=True)
 
+    benchmark = commands.add_parser(
+        "benchmark-exec", help="execute frozen benchmark bytes in the Runtime sandbox"
+    )
+    benchmark.add_argument("--request", type=Path, required=True)
+    benchmark.add_argument("--source", type=Path, required=True)
+    benchmark.add_argument("--fixture", type=Path, required=True)
+
     run = commands.add_parser("run", help="submit and execute a Workspace run request")
     run.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     run.add_argument("--package", type=Path)
@@ -83,6 +91,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.command == "sandbox-proof":
             payload = OciSandboxBackend(OciSandboxConfig(image=arguments.image)).capability_proof()
             exit_code = 0
+        elif arguments.command == "benchmark-exec":
+            payload = BenchmarkExecutionService(production_backend()).execute(
+                arguments.request, arguments.source, arguments.fixture
+            )
+            exit_code = 0 if payload["status"] == "completed" else 1
         elif arguments.command == "run":
             run = _run(
                 arguments.workspace,
@@ -127,7 +140,12 @@ def runtime_capabilities() -> dict[str, Any]:
         "status": "ok",
         "runtime_version": __version__,
         "cli_protocol": "quant-runtime.cli.v1",
-        "capabilities": ["frozen-preflight.v1", "preflight.v1", "run.v1"],
+        "capabilities": [
+            "benchmark-exec.v1",
+            "frozen-preflight.v1",
+            "preflight.v1",
+            "run.v1",
+        ],
     }
     return {**identity, "capability_id": sha256_value(identity)}
 

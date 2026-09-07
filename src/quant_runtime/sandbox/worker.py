@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import subprocess
@@ -50,6 +51,8 @@ def _candidate(arguments: list[str]) -> int:
         return _discovery(protocol, result_path)
     if protocol.get("phase") == "formal":
         return _formal(protocol, result_path)
+    if protocol.get("phase") == "benchmark_factor":
+        return _benchmark_factor(protocol, result_path)
     if protocol.get("phase") != "sandbox_probe":
         _write(result_path, _result(protocol, "policy_rejection", {"code": "worker_phase_invalid"}))
         return 0
@@ -142,6 +145,70 @@ _CONFORMANCE_DIMENSIONS = frozenset(
         "add_reduce",
     }
 )
+
+
+def _benchmark_factor(protocol: dict[str, Any], result_path: Path) -> int:
+    """Execute one already-frozen factor callable; scoring remains outside Runtime."""
+    from quant_runtime.artifacts import sha256_bytes
+    from quant_runtime.entrypoint import load_package_entrypoint
+
+    try:
+        source_identity = protocol["source"]
+        fixture_identity = protocol["fixture"]
+        entrypoint = str(protocol["entrypoint"])
+        source = Path("/sandbox/package") / entrypoint.partition(":")[0]
+        fixture_path = Path("/sandbox/inputs/fixture.json")
+        source_bytes = source.read_bytes()
+        fixture_bytes = fixture_path.read_bytes()
+        if not (
+            isinstance(source_identity, dict)
+            and isinstance(fixture_identity, dict)
+            and len(source_bytes) == source_identity.get("bytes")
+            and sha256_bytes(source_bytes) == source_identity.get("sha256")
+            and len(fixture_bytes) == fixture_identity.get("bytes")
+            and sha256_bytes(fixture_bytes) == fixture_identity.get("sha256")
+        ):
+            raise ValueError("benchmark transport identity mismatch")
+        fixture = _read(fixture_path)
+        rows = fixture.get("rows")
+        if not isinstance(rows, list):
+            raise ValueError("benchmark fixture rows are invalid")
+        evaluate = load_package_entrypoint(Path("/sandbox/package"), entrypoint)
+        if not callable(evaluate):
+            raise TypeError("benchmark entrypoint is not callable")
+        outputs = evaluate(rows)
+        if not isinstance(outputs, list) or len(outputs) != len(rows):
+            raise ValueError("benchmark output cardinality is invalid")
+        _assert_finite_json(outputs)
+    except Exception as exc:
+        classification = "strategy_rejection" if _originated_in_package(exc) else "policy_rejection"
+        _write(
+            result_path,
+            _result(protocol, classification, {"code": "benchmark_execution_rejected"}),
+        )
+        return 0
+    _write(result_path, _result(protocol, "success", {"outputs": outputs}))
+    return 0
+
+
+def _assert_finite_json(value: Any) -> None:
+    if value is None or isinstance(value, str | bool | int):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("benchmark output is non-finite")
+        return
+    if isinstance(value, list):
+        for item in value:
+            _assert_finite_json(item)
+        return
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) for key in value):
+            raise ValueError("benchmark output keys are invalid")
+        for item in value.values():
+            _assert_finite_json(item)
+        return
+    raise ValueError("benchmark output is not JSON-compatible")
 
 
 def _conformance(protocol: dict[str, Any], result_path: Path) -> int:

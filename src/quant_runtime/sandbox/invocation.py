@@ -18,7 +18,6 @@ from quant_runtime.materialization import (
     VerifiedPackageMaterializer,
     WorkspacePackageArtifactPort,
 )
-from quant_runtime.package import StrategyPackage
 from quant_runtime.sandbox.policy import SandboxPolicyRegistry
 
 
@@ -43,7 +42,7 @@ class CancellationToken:
 @dataclass(frozen=True, slots=True)
 class PreparedSandboxInvocation:
     protocol: dict[str, Any]
-    package: StrategyPackage
+    package: SandboxCodeMount
     inputs: Path
     output: Path
     cancellation: CancellationToken
@@ -53,6 +52,10 @@ class SandboxBackend(Protocol):
     production: bool
 
     def invoke(self, prepared: PreparedSandboxInvocation) -> Mapping[str, Any]: ...
+
+
+class SandboxCodeMount(Protocol):
+    root: Path
 
 
 class SandboxRunner:

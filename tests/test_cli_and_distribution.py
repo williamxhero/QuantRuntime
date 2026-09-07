@@ -189,9 +189,14 @@ def test_capabilities_are_deterministic_strict_and_side_effect_free(
     assert captured.err == ""
     assert len(captured.out.splitlines()) == 1
     assert payload["schema"] == "quant-runtime.cli-capabilities.v1"
-    assert payload["runtime_version"] == "0.2.4"
+    assert payload["runtime_version"] == "0.2.5"
     assert payload["cli_protocol"] == "quant-runtime.cli.v1"
-    assert payload["capabilities"] == ["frozen-preflight.v1", "preflight.v1", "run.v1"]
+    assert payload["capabilities"] == [
+        "benchmark-exec.v1",
+        "frozen-preflight.v1",
+        "preflight.v1",
+        "run.v1",
+    ]
     assert payload["capability_id"] == _canonical_sha256(identity)
 
 
@@ -351,7 +356,7 @@ def test_wheel_contains_only_runtime_execution_ownership(tmp_path: Path) -> None
         capture_output=True,
         text=True,
     )
-    wheel = next(output.glob("quant_runtime-0.2.4-*.whl"))
+    wheel = next(output.glob("quant_runtime-0.2.5-*.whl"))
     with ZipFile(wheel) as archive:
         names = set(archive.namelist())
         metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
