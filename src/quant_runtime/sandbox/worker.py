@@ -173,9 +173,31 @@ def _benchmark_factor(protocol: dict[str, Any], result_path: Path) -> int:
         rows = fixture.get("rows")
         if not isinstance(rows, list):
             raise ValueError("benchmark fixture rows are invalid")
+    except Exception:
+        _write(
+            result_path,
+            _result(
+                protocol,
+                "policy_rejection",
+                {"compiled": False, "code": "benchmark_transport_rejected"},
+            ),
+        )
+        return 0
+    try:
         evaluate = load_package_entrypoint(Path("/sandbox/package"), entrypoint)
         if not callable(evaluate):
             raise TypeError("benchmark entrypoint is not callable")
+    except Exception:
+        _write(
+            result_path,
+            _result(
+                protocol,
+                "strategy_rejection",
+                {"compiled": False, "code": "benchmark_compile_rejected"},
+            ),
+        )
+        return 0
+    try:
         outputs = evaluate(rows)
         if not isinstance(outputs, list) or len(outputs) != len(rows):
             raise ValueError("benchmark output cardinality is invalid")
@@ -184,10 +206,17 @@ def _benchmark_factor(protocol: dict[str, Any], result_path: Path) -> int:
         classification = "strategy_rejection" if _originated_in_package(exc) else "policy_rejection"
         _write(
             result_path,
-            _result(protocol, classification, {"code": "benchmark_execution_rejected"}),
+            _result(
+                protocol,
+                classification,
+                {"compiled": True, "code": "benchmark_execution_rejected"},
+            ),
         )
         return 0
-    _write(result_path, _result(protocol, "success", {"outputs": outputs}))
+    _write(
+        result_path,
+        _result(protocol, "success", {"compiled": True, "outputs": outputs}),
+    )
     return 0
 
 

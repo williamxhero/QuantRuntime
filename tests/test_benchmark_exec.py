@@ -27,7 +27,7 @@ class ContractBackend:
             "schema": "quant-runtime.sandbox-worker-result.v2",
             "invocation_id": prepared.protocol["invocation_id"],
             "classification": "success",
-            "payload": {"outputs": [None, None, -0.1]},
+            "payload": {"compiled": True, "outputs": [None, None, -0.1]},
             "sandbox": {"contract": "fake"},
         }
 
@@ -57,9 +57,7 @@ def _write_inputs(root: Path, *, mode: str = "contract_fake") -> tuple[Path, Pat
         "entrypoint": "factor.py:evaluate",
         "sandbox_profile": {},
     }
-    request.write_text(
-        json.dumps({**body, "invocation_id": sha256_value(body)}), encoding="utf-8"
-    )
+    request.write_text(json.dumps({**body, "invocation_id": sha256_value(body)}), encoding="utf-8")
     return request, source, fixture
 
 
@@ -75,7 +73,7 @@ def test_transport_only_execution_is_content_bound_and_path_independent(tmp_path
     assert first == second
     assert first["status"] == "completed"
     assert first["classification"] == "success"
-    assert first["payload"] == {"outputs": [None, None, -0.1]}
+    assert first["payload"] == {"compiled": True, "outputs": [None, None, -0.1]}
     assert not ({"run_id", "request_id", "evidence", "strategy_package"} & set(first))
     assert len(first_backend.calls) == len(second_backend.calls) == 1
 
@@ -89,6 +87,32 @@ def test_transport_digest_drift_fails_before_sandbox_invocation(tmp_path: Path) 
         BenchmarkExecutionService(backend).execute(*paths)
 
     assert backend.calls == []
+
+
+def test_entrypoint_requires_one_python_transport_file(tmp_path: Path) -> None:
+    request, source, fixture = _write_inputs(tmp_path)
+    payload = json.loads(request.read_text(encoding="utf-8"))
+    payload["entrypoint"] = "factor.txt:evaluate"
+    identity = {key: value for key, value in payload.items() if key != "invocation_id"}
+    payload["invocation_id"] = sha256_value(identity)
+    request.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="entrypoint"):
+        BenchmarkExecutionService(ContractBackend()).execute(request, source, fixture)
+
+
+class OversizedResultBackend(ContractBackend):
+    def invoke(self, prepared: PreparedSandboxInvocation) -> dict[str, Any]:
+        result = super().invoke(prepared)
+        result["payload"] = {"compiled": True, "outputs": ["x" * (2**21)]}
+        return result
+
+
+def test_worker_result_is_bounded_before_transport_return(tmp_path: Path) -> None:
+    paths = _write_inputs(tmp_path)
+
+    with pytest.raises(ValueError, match="bounded"):
+        BenchmarkExecutionService(OversizedResultBackend()).execute(*paths)
 
 
 def test_production_mode_requires_a_production_attested_backend(tmp_path: Path) -> None:
@@ -108,17 +132,20 @@ def test_cli_exposes_strict_benchmark_exec_without_workspace_run_fields(
 ) -> None:
     request, source, fixture = _write_inputs(tmp_path, mode="production_attested_oci")
 
-    assert main(
-        [
-            "benchmark-exec",
-            "--request",
-            str(request),
-            "--source",
-            str(source),
-            "--fixture",
-            str(fixture),
-        ]
-    ) == 1
+    assert (
+        main(
+            [
+                "benchmark-exec",
+                "--request",
+                str(request),
+                "--source",
+                str(source),
+                "--fixture",
+                str(fixture),
+            ]
+        )
+        == 1
+    )
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert captured.err == ""

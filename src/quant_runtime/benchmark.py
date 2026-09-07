@@ -20,6 +20,7 @@ from quant_runtime.transport import TransportContractError, read_transport_json
 
 MAX_SOURCE_BYTES = 2**24
 MAX_FIXTURE_BYTES = 2**31 - 1
+MAX_RESULT_BYTES = 2**21
 
 
 class BenchmarkBackend(Protocol):
@@ -44,9 +45,7 @@ class BenchmarkExecutionService:
     def __init__(self, backend: BenchmarkBackend) -> None:
         self._backend = backend
 
-    def execute(
-        self, request_path: Path, source_path: Path, fixture_path: Path
-    ) -> dict[str, Any]:
+    def execute(self, request_path: Path, source_path: Path, fixture_path: Path) -> dict[str, Any]:
         request = _request(read_transport_json(request_path))
         source_identity = _blob_identity(request["source"], "text/x-python")
         fixture_identity = _blob_identity(request["fixture"], "application/json")
@@ -124,9 +123,11 @@ def _request(value: dict[str, Any]) -> dict[str, Any]:
     if value.get("execution_mode") not in {"contract_fake", "production_attested_oci"}:
         raise TransportContractError("benchmark execution mode is invalid")
     entrypoint = value.get("entrypoint")
-    if not isinstance(entrypoint, str) or re.fullmatch(
-        r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}:[A-Za-z_][A-Za-z0-9_]*", entrypoint
-    ) is None:
+    if (
+        not isinstance(entrypoint, str)
+        or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,124}\.py:[A-Za-z_][A-Za-z0-9_]*", entrypoint)
+        is None
+    ):
         raise TransportContractError("benchmark entrypoint is invalid")
     filename = entrypoint.partition(":")[0]
     if Path(filename).name != filename:
@@ -187,10 +188,7 @@ def _read_blob(path: Path, identity: BlobIdentity, label: str, maximum: int) -> 
         raise
     except OSError as exc:
         raise TransportContractError(f"benchmark {label} is unavailable") from exc
-    if (
-        len(content) != identity.bytes
-        or hashlib.sha256(content).hexdigest() != identity.sha256
-    ):
+    if len(content) != identity.bytes or hashlib.sha256(content).hexdigest() != identity.sha256:
         raise TransportContractError(f"benchmark {label} identity mismatch")
     return content
 
@@ -208,9 +206,7 @@ def _strict_json_object(content: bytes, *, label: str) -> dict[str, Any]:
         raise TransportContractError(f"{label} contains non-finite value {value}")
 
     try:
-        parsed = json.loads(
-            content.decode("utf-8"), object_pairs_hook=pairs, parse_constant=reject
-        )
+        parsed = json.loads(content.decode("utf-8"), object_pairs_hook=pairs, parse_constant=reject)
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise TransportContractError(f"{label} is not strict JSON") from exc
     if not isinstance(parsed, dict):
@@ -220,6 +216,14 @@ def _strict_json_object(content: bytes, *, label: str) -> dict[str, Any]:
 
 def _worker_result(value: Mapping[str, Any], invocation_id: str) -> dict[str, Any]:
     mapped = {str(key): item for key, item in value.items()}
+    try:
+        encoded = json.dumps(mapped, sort_keys=True, separators=(",", ":"), allow_nan=False).encode(
+            "utf-8"
+        )
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise TransportContractError("benchmark sandbox result is invalid") from exc
+    if len(encoded) > MAX_RESULT_BYTES:
+        raise TransportContractError("benchmark sandbox result must be bounded")
     required = {"schema", "invocation_id", "classification", "payload", "sandbox"}
     if (
         set(mapped) != required
