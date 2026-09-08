@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ast
+import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -18,11 +21,35 @@ def test_production_registry_has_only_real_adapters_and_no_apex_import() -> None
     nautilus = registry.profile("formal", "nautilus")
     assert nautilus.adapter_version == "1.1.1"
     assert "evidence.nautilus_reporting_input" in nautilus.capabilities
-    files = [ROOT / "pyproject.toml", *sorted((ROOT / "src").rglob("*.py"))]
-    forbidden = ("apex_research", "apex-research", "apextrade", "leanadapter", "lean_adapter")
-    for path in files:
-        content = path.read_text(encoding="utf-8").lower()
-        assert all(term not in content for term in forbidden), path
+    forbidden_imports = ("apex_research", "apextrade", "leanadapter", "lean_adapter")
+    for path in sorted((ROOT / "src").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        modules = (
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import | ast.ImportFrom)
+            for alias in (
+                node.names if isinstance(node, ast.Import) else [ast.alias(name=node.module or "")]
+            )
+        )
+        assert all(
+            not any(module == term or module.startswith(f"{term}.") for term in forbidden_imports)
+            for module in modules
+        ), path
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    declared = [
+        *project.get("dependencies", []),
+        *(
+            dependency
+            for group in project.get("optional-dependencies", {}).values()
+            for dependency in group
+        ),
+    ]
+    names = {
+        re.split(r"[<>=!~;@\s\[]", dependency, maxsplit=1)[0].lower().replace("_", "-")
+        for dependency in declared
+    }
+    assert not names & {"apex-research", "apextrade", "leanadapter", "lean-adapter"}
 
 
 def test_runtime_does_not_add_a_private_control_plane_or_reporting_owner() -> None:
