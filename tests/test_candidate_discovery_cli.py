@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 import platform
+import sys
 from pathlib import Path
 
+import joblib
 import pytest
 from strategy_workspace import WorkspaceClient
 
@@ -176,13 +180,20 @@ def _model_request(artifact: dict[str, object]) -> dict[str, object]:
         "training_environment": {
             "runtime": "cpython",
             "runtime_version": platform.python_version(),
-            "platform": "portable",
+            "platform": _runtime_platform(),
             "dependency_lock_sha256": CANDIDATE_DISCOVERY_LOCK_SHA256,
             "container_image_sha256": None,
         },
         "source_artifact": artifact,
     }
     return request
+
+
+def _runtime_platform() -> str:
+    machine = platform.machine().lower()
+    architecture = "aarch64" if machine in {"arm64", "aarch64"} else "x86_64"
+    operating_system = "windows" if sys.platform == "win32" else "linux"
+    return f"{operating_system}-{architecture}"
 
 
 def test_candidate_discovery_cli_calculates_factor_from_frozen_bytes(
@@ -299,3 +310,8 @@ def test_candidate_discovery_trains_model_and_replays_exact_artifact(
     assert trained["logical_role"] == "trained-model"
     assert trained["record_schema"] == "quant-runtime.ridge-model.v1"
     assert client.verify_artifact(trained["uri"])["verified"] is True
+    readback = client.read_artifact(trained["uri"])
+    model_payload = joblib.load(io.BytesIO(base64.b64decode(readback["content"], validate=True)))
+    assert "request_id" not in model_payload
+    assert model_payload["data"]["artifact"]["sha256"] == request["data"]["artifact"]["sha256"]
+    assert model_payload["runtime_environment"]["platform"] == _runtime_platform()

@@ -191,11 +191,13 @@ def test_capabilities_are_deterministic_strict_and_side_effect_free(
     assert captured.err == ""
     assert len(captured.out.splitlines()) == 1
     assert payload["schema"] == "quant-runtime.cli-capabilities.v1"
-    assert payload["runtime_version"] == "0.2.6"
+    assert payload["runtime_version"] == "0.2.7"
     assert payload["cli_protocol"] == "quant-runtime.cli.v1"
     assert payload["capabilities"] == [
         "benchmark-exec.v1",
         "benchmark-exec.v2",
+        "candidate-discovery.v1",
+        "candidate-discovery-lock-sha256:7708d1ecc05e2a4bc6d4835b31b8eb518e81117f9bda5124dbc807ed1c49f77d",
         "frozen-preflight.v1",
         "preflight.v1",
         "run.v1",

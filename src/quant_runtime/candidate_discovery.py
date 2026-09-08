@@ -232,17 +232,26 @@ class CandidateDiscoveryService:
         }
         if any(isinstance(value, float) and not math.isfinite(value) for value in metrics.values()):
             raise CandidateDiscoveryError("Model discovery produced a non-finite metric")
+        observed_environment = {
+            "backend_id": "qlib",
+            "adapter_version": "candidate-discovery.v1",
+            "engine_version": qlib.__version__,
+            "python_version": platform.python_version(),
+            "platform": _runtime_platform(),
+            "dependency_lock_sha256": CANDIDATE_DISCOVERY_LOCK_SHA256,
+        }
         model_payload = {
             "schema": "quant-runtime.ridge-model.v1",
-            "request_id": request_id,
             "factor_revisions": factor_refs,
             "feature_names": list(feature_names),
+            "data": request["data"],
             "label": task["label"],
             "windows": task["windows"],
             "fit_timestamp": task["fit_timestamp"],
             "estimator": task["estimator"],
             "seeds": task["seeds"],
             "training_environment": task["training_environment"],
+            "runtime_environment": observed_environment,
             "coef": [float(value) for value in estimator.coef_],
             "intercept": float(estimator.intercept_),
         }
@@ -259,13 +268,6 @@ class CandidateDiscoveryService:
         prediction_bytes = prediction_rows.to_csv(
             index=False, lineterminator="\n", float_format="%.12g"
         ).encode("utf-8")
-        observed_environment = {
-            "backend_id": "qlib",
-            "adapter_version": "candidate-discovery.v1",
-            "engine_version": qlib.__version__,
-            "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
-            "dependency_lock_sha256": CANDIDATE_DISCOVERY_LOCK_SHA256,
-        }
         manifest = {
             "schema": "quant-runtime.candidate-discovery-artifact-manifest.v1",
             "request_id": request_id,
@@ -762,12 +764,29 @@ def _validate_model_task(task: Mapping[str, Any]) -> None:
     if (
         environment["runtime"] != "cpython"
         or environment["runtime_version"] != platform.python_version()
-        or environment["platform"] != "portable"
+        or environment["platform"] != _runtime_platform()
         or environment["dependency_lock_sha256"] != CANDIDATE_DISCOVERY_LOCK_SHA256
         or environment["container_image_sha256"] is not None
     ):
         raise CandidateDiscoveryError("Model training environment drifted")
     _validate_artifact(_object(task, "source_artifact"), "Model source artifact")
+
+
+def _runtime_platform() -> str:
+    machine = platform.machine().lower()
+    if machine in {"amd64", "x86_64"}:
+        architecture = "x86_64"
+    elif machine in {"arm64", "aarch64"}:
+        architecture = "aarch64"
+    else:
+        raise CandidateDiscoveryError("Model training platform is unsupported")
+    if sys.platform == "win32":
+        operating_system = "windows"
+    elif sys.platform.startswith("linux"):
+        operating_system = "linux"
+    else:
+        raise CandidateDiscoveryError("Model training platform is unsupported")
+    return f"{operating_system}-{architecture}"
 
 
 def _validate_factor_calculation(calculation: Mapping[str, Any]) -> None:
