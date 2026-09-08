@@ -65,6 +65,7 @@ def test_cli_exposes_runtime_commands_with_strict_json_stdout(
     ).choices
     assert set(choices) == {
         "benchmark-exec",
+        "candidate-discovery",
         "capabilities",
         "conformance",
         "preflight",
@@ -155,6 +156,7 @@ def test_cli_exposes_side_effect_free_preflight() -> None:
 
     assert set(choices) == {
         "benchmark-exec",
+        "candidate-discovery",
         "capabilities",
         "conformance",
         "preflight",
@@ -361,7 +363,7 @@ def test_wheel_contains_only_runtime_execution_ownership(tmp_path: Path) -> None
         capture_output=True,
         text=True,
     )
-    wheel = next(output.glob("quant_runtime-0.2.6-*.whl"))
+    wheel = next(output.glob("quant_runtime-0.2.7-*.whl"))
     with ZipFile(wheel) as archive:
         names = set(archive.namelist())
         metadata_name = next(name for name in names if name.endswith(".dist-info/METADATA"))
