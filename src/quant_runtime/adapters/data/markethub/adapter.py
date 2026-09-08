@@ -179,8 +179,7 @@ class MarketHubDataAdapter:
             if isinstance(verification.dataset, CanonicalFuturesDataset)
             else {
                 instrument.instrument: sum(
-                    bar.instrument == instrument.instrument
-                    for bar in verification.dataset.bars
+                    bar.instrument == instrument.instrument for bar in verification.dataset.bars
                 )
                 for instrument in verification.dataset.instruments
             }

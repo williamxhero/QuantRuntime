@@ -56,16 +56,12 @@ class RuntimePreflight:
             )
             required_semantics = _required_semantics(snapshot_value)
             as_of = _as_of(snapshot_value)
-            versioned_observation = (
-                value["schema"] == "quant-research.runtime-preflight-request.v4"
-            )
+            versioned_observation = value["schema"] == "quant-research.runtime-preflight-request.v4"
             if versioned_observation:
-                frozen_snapshot, observation = (
-                    self.data_adapter.freeze_reference_with_observation(
-                        request,
-                        as_of=as_of,
-                        required_semantics=required_semantics,
-                    )
+                frozen_snapshot, observation = self.data_adapter.freeze_reference_with_observation(
+                    request,
+                    as_of=as_of,
+                    required_semantics=required_semantics,
                 )
             else:
                 frozen_snapshot = self.data_adapter.freeze_reference(
@@ -136,9 +132,7 @@ def validate_frozen_transport(
     """Validate frozen transport integrity without touching any external owner."""
 
     value = _draft(draft)
-    versioned_observation = (
-        value["schema"] == "quant-research.runtime-preflight-request.v4"
-    )
+    versioned_observation = value["schema"] == "quant-research.runtime-preflight-request.v4"
     expected_result_fields = {"schema", "status", "frozen_snapshot", "evidence"} | (
         {"observation"} if versioned_observation else set()
     )
@@ -330,11 +324,14 @@ def _validate_data_observation(value: object, snapshot: Mapping[str, Any]) -> No
         value.get("data_revision") != source.get("data_revision")
         or value.get("data_version") != verification.get("data_version")
         or value.get("dataset_version") != verification.get("dataset_version")
-        or any(value.get(name) != verification.get(name) for name in (
-            "catalog_hash",
-            "calendar_hash",
-            "coverage_hash",
-        ))
+        or any(
+            value.get(name) != verification.get(name)
+            for name in (
+                "catalog_hash",
+                "calendar_hash",
+                "coverage_hash",
+            )
+        )
     ):
         raise PreflightRequestError("Runtime data observation identity drifted")
     counts = value.get("instrument_sample_counts")
@@ -413,10 +410,14 @@ def _draft(value: Mapping[str, Any]) -> dict[str, Any]:
         "quant-research.runtime-preflight-request.v4",
     }:
         raise PreflightRequestError("preflight draft schema is invalid")
-    if draft["schema"] in {
-        "quant-research.runtime-preflight-request.v1",
-        "quant-research.runtime-preflight-request.v4",
-    } and set(draft) != base:
+    if (
+        draft["schema"]
+        in {
+            "quant-research.runtime-preflight-request.v1",
+            "quant-research.runtime-preflight-request.v4",
+        }
+        and set(draft) != base
+    ):
         raise PreflightRequestError("legacy preflight draft cannot carry sandbox fields")
     if (
         draft["schema"]

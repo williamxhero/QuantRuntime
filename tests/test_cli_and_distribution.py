@@ -199,10 +199,10 @@ def test_capabilities_are_deterministic_strict_and_side_effect_free(
         "benchmark-exec.v1",
         "benchmark-exec.v2",
         "candidate-discovery.v1",
-            "candidate-discovery-lock-sha256:7708d1ecc05e2a4bc6d4835b31b8eb518e81117f9bda5124dbc807ed1c49f77d",
-            "frozen-preflight.v1",
-            "preflight-observation.v2",
-            "preflight.v1",
+        "candidate-discovery-lock-sha256:7708d1ecc05e2a4bc6d4835b31b8eb518e81117f9bda5124dbc807ed1c49f77d",
+        "frozen-preflight.v1",
+        "preflight-observation.v2",
+        "preflight.v1",
         "run.v1",
     ]
     assert payload["capability_id"] == _canonical_sha256(identity)
