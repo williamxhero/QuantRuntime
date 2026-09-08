@@ -5,17 +5,21 @@ from __future__ import annotations
 import base64
 import io
 import math
+import sys
 from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
 
+import joblib
 import pandas as pd
 import qlib
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_squared_error, r2_score
 from strategy_workspace import WorkspaceClient
 
 from quant_runtime.artifacts import canonical_json, sha256_bytes, sha256_value
 
-CANDIDATE_DISCOVERY_LOCK_SHA256 = "dd4bf303e363a6bb7e4e9d113609c86e429329470a182da1a877f913427246eb"
+CANDIDATE_DISCOVERY_LOCK_SHA256 = "7708d1ecc05e2a4bc6d4835b31b8eb518e81117f9bda5124dbc807ed1c49f77d"
 REQUEST_SCHEMA = "quant-runtime.candidate-discovery-request.v1"
 RESULT_SCHEMA = "quant-runtime.candidate-discovery-result.v1"
 RECORD_TYPE = "quant-runtime.candidate-discovery.v1"
@@ -34,11 +38,11 @@ class CandidateDiscoveryService:
         request = _request(value)
         request_id = sha256_value(request)
         task = _object(request, "task")
-        if task["kind"] != "factor":
-            raise CandidateDiscoveryError("candidate discovery task kind is unsupported")
         candidate = _object(task, "candidate_revision")
         self._require_candidate(candidate)
         frame = self._read_frame(_object(request, "data"), _object(request, "limits"))
+        if task["kind"] == "model":
+            return self._execute_model(request, request_id, task, candidate, frame)
         values = _factor_values(frame, task)
         output = frame[
             [request["data"]["timestamp_column"], request["data"]["instrument_column"]]
@@ -167,6 +171,217 @@ class CandidateDiscoveryService:
             "artifacts": published_artifacts,
         }
 
+    def _execute_model(
+        self,
+        request: dict[str, Any],
+        request_id: str,
+        task: dict[str, Any],
+        candidate: dict[str, Any],
+        frame: pd.DataFrame,
+    ) -> dict[str, Any]:
+        features: dict[str, pd.Series] = {}
+        factor_refs: list[dict[str, Any]] = []
+        for feature in task["features"]:
+            factor = dict(feature["factor_revision"])
+            self._require_candidate(factor)
+            factor_refs.append(factor)
+            features[str(feature["feature_name"])] = _factor_values(frame, feature["calculation"])
+        design = pd.DataFrame(features)
+        label_field = str(task["label"]["field"])
+        design["__label__"] = pd.to_numeric(frame[label_field], errors="coerce")
+        timestamps = pd.to_datetime(
+            frame[str(request["data"]["timestamp_column"])], utc=True, errors="raise"
+        )
+        windows = task["windows"]
+        masks = {
+            name: (timestamps >= pd.Timestamp(window["start"], tz="UTC"))
+            & (timestamps <= pd.Timestamp(window["end"], tz="UTC"))
+            for name, window in windows.items()
+        }
+        complete = design.dropna()
+        train_index = complete.index.intersection(design.index[masks["train"]])
+        validation_index = complete.index.intersection(design.index[masks["validation"]])
+        test_index = complete.index.intersection(design.index[masks["test"]])
+        if len(train_index) < 2 or not len(validation_index) or not len(test_index):
+            raise CandidateDiscoveryError("Model windows contain insufficient complete samples")
+        feature_names = tuple(features)
+        hyperparameters = task["estimator"]["hyperparameters"]
+        estimator = Ridge(
+            alpha=float(hyperparameters["alpha"]),
+            fit_intercept=bool(hyperparameters["fit_intercept"]),
+            solver="svd",
+        )
+        estimator.fit(design.loc[train_index, feature_names], design.loc[train_index, "__label__"])
+        validation_predictions = estimator.predict(design.loc[validation_index, feature_names])
+        test_predictions = estimator.predict(design.loc[test_index, feature_names])
+        metrics = {
+            "train_rows": int(len(train_index)),
+            "validation_rows": int(len(validation_index)),
+            "test_rows": int(len(test_index)),
+            "validation_mse": float(
+                mean_squared_error(
+                    design.loc[validation_index, "__label__"], validation_predictions
+                )
+            ),
+            "test_mse": float(
+                mean_squared_error(design.loc[test_index, "__label__"], test_predictions)
+            ),
+            "test_r2": float(r2_score(design.loc[test_index, "__label__"], test_predictions)),
+        }
+        if any(isinstance(value, float) and not math.isfinite(value) for value in metrics.values()):
+            raise CandidateDiscoveryError("Model discovery produced a non-finite metric")
+        model_payload = {
+            "schema": "quant-runtime.ridge-model.v1",
+            "request_id": request_id,
+            "factor_revisions": factor_refs,
+            "feature_names": list(feature_names),
+            "label": task["label"],
+            "windows": task["windows"],
+            "fit_timestamp": task["fit_timestamp"],
+            "estimator": task["estimator"],
+            "seeds": task["seeds"],
+            "training_environment": task["training_environment"],
+            "coef": [float(value) for value in estimator.coef_],
+            "intercept": float(estimator.intercept_),
+        }
+        model_buffer = io.BytesIO()
+        joblib.dump(model_payload, model_buffer, compress=0, protocol=5)
+        model_bytes = model_buffer.getvalue()
+        prediction_rows = pd.DataFrame(
+            {
+                "row": [*validation_index, *test_index],
+                "split": ["validation"] * len(validation_index) + ["test"] * len(test_index),
+                "prediction": [*validation_predictions, *test_predictions],
+            }
+        )
+        prediction_bytes = prediction_rows.to_csv(
+            index=False, lineterminator="\n", float_format="%.12g"
+        ).encode("utf-8")
+        observed_environment = {
+            "backend_id": "qlib",
+            "adapter_version": "candidate-discovery.v1",
+            "engine_version": qlib.__version__,
+            "python_version": f"{sys.version_info.major}.{sys.version_info.minor}",
+            "dependency_lock_sha256": CANDIDATE_DISCOVERY_LOCK_SHA256,
+        }
+        manifest = {
+            "schema": "quant-runtime.candidate-discovery-artifact-manifest.v1",
+            "request_id": request_id,
+            "task_kind": "model",
+            "candidate_revision": candidate,
+            "factor_revisions": factor_refs,
+            "input_artifact_sha256": request["data"]["artifact"]["sha256"],
+            "model_sha256": sha256_bytes(model_bytes),
+            "prediction_sha256": sha256_bytes(prediction_bytes),
+            "metrics": metrics,
+            "environment": observed_environment,
+        }
+        manifest_bytes = canonical_json(manifest) + b"\n"
+        artifact_specs = (
+            {
+                "source": model_bytes,
+                "media_type": "application/octet-stream",
+                "record_schema": "quant-runtime.ridge-model.v1",
+                "logical_role": "trained-model",
+                "name": "model.joblib",
+            },
+            {
+                "source": prediction_bytes,
+                "media_type": "text/csv",
+                "record_schema": "quant-runtime.model-predictions.v1",
+                "logical_role": "candidate-discovery-output",
+                "name": "predictions.csv",
+            },
+            {
+                "source": manifest_bytes,
+                "media_type": "application/json",
+                "record_schema": manifest["schema"],
+                "logical_role": "candidate-discovery-manifest",
+                "name": "discovery-manifest.json",
+            },
+        )
+        if (
+            sum(len(item["source"]) for item in artifact_specs)
+            > request["limits"]["max_output_bytes"]
+        ):
+            raise CandidateDiscoveryError("candidate discovery output exceeds the byte limit")
+        payload = {
+            "schema": RECORD_TYPE,
+            "status": "completed",
+            "evidence_level": "discovery-only",
+            "request_id": request_id,
+            "task_kind": "model",
+            "candidate_revision": candidate,
+            "factor_revisions": factor_refs,
+            "data": request["data"],
+            "label": task["label"],
+            "windows": task["windows"],
+            "fit_timestamp": task["fit_timestamp"],
+            "estimator": task["estimator"],
+            "seeds": task["seeds"],
+            "training_environment": task["training_environment"],
+            "environment": observed_environment,
+            "metrics": metrics,
+            "artifact_digests": sorted(sha256_bytes(item["source"]) for item in artifact_specs),
+        }
+        record_id = sha256_value(payload)
+        lineage = [
+            {
+                "source_kind": item["record_type"],
+                "source_id": item["record_id"],
+                "relation": "evaluates-candidate" if item is candidate else "uses-factor-revision",
+            }
+            for item in [candidate, *factor_refs]
+        ]
+        publication = {
+            "record_id": record_id,
+            "record_type": RECORD_TYPE,
+            "payload": payload,
+            "lineage": lineage,
+        }
+        try:
+            current = self._workspace.get_record(record_id)
+        except Exception as exc:
+            if getattr(exc, "code", None) != "record_not_found" and not isinstance(exc, KeyError):
+                raise
+            current = self._workspace.publish_record(publication, artifacts=artifact_specs)
+        if (
+            current.get("record_id") != record_id
+            or current.get("record_type") != RECORD_TYPE
+            or current.get("payload") != payload
+            or current.get("lineage") != lineage
+        ):
+            raise CandidateDiscoveryError("candidate discovery publication identity conflict")
+        published_artifacts = current.get("artifacts")
+        if not isinstance(published_artifacts, list) or len(published_artifacts) != 3:
+            raise CandidateDiscoveryError("candidate discovery artifacts are incomplete")
+        if (
+            sorted(str(item.get("sha256", "")) for item in published_artifacts)
+            != payload["artifact_digests"]
+        ):
+            raise CandidateDiscoveryError("candidate discovery artifact identity mismatch")
+        for artifact in published_artifacts:
+            if (
+                self._workspace.verify_artifact(str(artifact["uri"])).get("sha256")
+                != artifact["sha256"]
+            ):
+                raise CandidateDiscoveryError("candidate discovery artifact verification failed")
+        if self._workspace.get_record(record_id) != current:
+            raise CandidateDiscoveryError("candidate discovery canonical readback mismatch")
+        return {
+            "schema": RESULT_SCHEMA,
+            "status": "completed",
+            "evidence_level": "discovery-only",
+            "request_id": request_id,
+            "task_kind": "model",
+            "backend_id": "qlib",
+            "adapter_version": "candidate-discovery.v1",
+            "engine_version": qlib.__version__,
+            "metrics": metrics,
+            "result": {"record_id": record_id, "record_type": RECORD_TYPE},
+            "artifacts": published_artifacts,
+        }
+
     def _require_candidate(self, candidate: Mapping[str, Any]) -> None:
         current = self._workspace.get_record(str(candidate["record_id"]))
         if (
@@ -209,77 +424,12 @@ def _request(value: Mapping[str, Any]) -> dict[str, Any]:
     if request["schema"] != REQUEST_SCHEMA:
         raise CandidateDiscoveryError("candidate discovery request schema is invalid")
     task = _object(request, "task")
-    _keys(
-        task,
-        {
-            "kind",
-            "candidate_revision",
-            "expression",
-            "inputs",
-            "output",
-            "warm_up",
-            "missing_values",
-        },
-        "Factor task",
-    )
-    if task["kind"] != "factor":
+    if task.get("kind") == "factor":
+        _validate_factor_task(task)
+    elif task.get("kind") == "model":
+        _validate_model_task(task)
+    else:
         raise CandidateDiscoveryError("candidate discovery task kind is invalid")
-    candidate = _object(task, "candidate_revision")
-    _keys(candidate, {"record_id", "record_type", "semantic_id"}, "candidate")
-    _sha(candidate["record_id"], "candidate record")
-    _sha(candidate["semantic_id"], "candidate semantic")
-    if candidate["record_type"] != "apex-research.factor-candidate.v1":
-        raise CandidateDiscoveryError("Factor task candidate type is invalid")
-    inputs = task["inputs"]
-    if not isinstance(inputs, list) or not inputs or len(inputs) > 64:
-        raise CandidateDiscoveryError("Factor inputs are invalid")
-    names: set[str] = set()
-    for item in inputs:
-        if not isinstance(item, Mapping):
-            raise CandidateDiscoveryError("Factor input must be an object")
-        current = dict(item)
-        _keys(
-            current,
-            {
-                "name",
-                "field",
-                "frequency",
-                "adjustment",
-                "as_of",
-                "lag_bars",
-                "unit",
-                "null_policy",
-            },
-            "Factor input",
-        )
-        name = _bounded(current["name"], "Factor input name")
-        field = _bounded(current["field"], "Factor input field")
-        if name in names or field.startswith("__"):
-            raise CandidateDiscoveryError("Factor input names must be unique and safe")
-        names.add(name)
-        if current["frequency"] not in {"1d", "1m"}:
-            raise CandidateDiscoveryError("Factor input frequency is unsupported")
-        if current["adjustment"] not in {"none", "forward", "backward"}:
-            raise CandidateDiscoveryError("Factor adjustment is unsupported")
-        if current["as_of"] not in {"decision_time", "prior_close"}:
-            raise CandidateDiscoveryError("Factor as-of policy is unsupported")
-        if not isinstance(current["lag_bars"], int) or not 0 <= current["lag_bars"] <= 10_000:
-            raise CandidateDiscoveryError("Factor lag is invalid")
-        if current["null_policy"] not in {"reject", "allow"}:
-            raise CandidateDiscoveryError("Factor null policy is unsupported")
-    _validate_expression(task["expression"], names, 0)
-    output = _object(task, "output")
-    _keys(output, {"dtype", "unit"}, "Factor output")
-    if output["dtype"] != "float64" or not _bounded(output["unit"], "Factor output unit"):
-        raise CandidateDiscoveryError("Factor output contract is unsupported")
-    warm_up = _object(task, "warm_up")
-    _keys(warm_up, {"periods", "behavior"}, "Factor warm-up")
-    if not isinstance(warm_up["periods"], int) or not 0 <= warm_up["periods"] <= 100_000:
-        raise CandidateDiscoveryError("Factor warm-up is invalid")
-    if warm_up["behavior"] not in {"emit_null", "reject"}:
-        raise CandidateDiscoveryError("Factor warm-up behavior is unsupported")
-    if task["missing_values"] not in {"propagate", "reject"}:
-        raise CandidateDiscoveryError("Factor missing-value policy is unsupported")
     data = _object(request, "data")
     _keys(
         data,
@@ -353,6 +503,275 @@ def _request(value: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(limits[name], int) or not 1 <= limits[name] <= maximum:
             raise CandidateDiscoveryError("candidate discovery limits are invalid")
     return request
+
+
+def _validate_factor_task(task: Mapping[str, Any]) -> None:
+    _keys(
+        task,
+        {
+            "kind",
+            "candidate_revision",
+            "expression",
+            "inputs",
+            "output",
+            "warm_up",
+            "missing_values",
+        },
+        "Factor task",
+    )
+    if task["kind"] != "factor":
+        raise CandidateDiscoveryError("candidate discovery task kind is invalid")
+    candidate = _object(task, "candidate_revision")
+    _keys(candidate, {"record_id", "record_type", "semantic_id"}, "candidate")
+    _sha(candidate["record_id"], "candidate record")
+    _sha(candidate["semantic_id"], "candidate semantic")
+    if candidate["record_type"] != "apex-research.factor-candidate.v1":
+        raise CandidateDiscoveryError("Factor task candidate type is invalid")
+    inputs = task["inputs"]
+    if not isinstance(inputs, list) or not inputs or len(inputs) > 64:
+        raise CandidateDiscoveryError("Factor inputs are invalid")
+    names: set[str] = set()
+    for item in inputs:
+        if not isinstance(item, Mapping):
+            raise CandidateDiscoveryError("Factor input must be an object")
+        current = dict(item)
+        _keys(
+            current,
+            {
+                "name",
+                "field",
+                "frequency",
+                "adjustment",
+                "as_of",
+                "lag_bars",
+                "unit",
+                "null_policy",
+            },
+            "Factor input",
+        )
+        name = _bounded(current["name"], "Factor input name")
+        field = _bounded(current["field"], "Factor input field")
+        if name in names or field.startswith("__"):
+            raise CandidateDiscoveryError("Factor input names must be unique and safe")
+        names.add(name)
+        if current["frequency"] not in {"1d", "1m"}:
+            raise CandidateDiscoveryError("Factor input frequency is unsupported")
+        if current["adjustment"] not in {"none", "forward", "backward"}:
+            raise CandidateDiscoveryError("Factor adjustment is unsupported")
+        if current["as_of"] not in {"decision_time", "prior_close"}:
+            raise CandidateDiscoveryError("Factor as-of policy is unsupported")
+        if not isinstance(current["lag_bars"], int) or not 0 <= current["lag_bars"] <= 10_000:
+            raise CandidateDiscoveryError("Factor lag is invalid")
+        if current["null_policy"] not in {"reject", "allow"}:
+            raise CandidateDiscoveryError("Factor null policy is unsupported")
+    _validate_expression(task["expression"], names, 0)
+    output = _object(task, "output")
+    _keys(output, {"dtype", "unit"}, "Factor output")
+    if output["dtype"] != "float64" or not _bounded(output["unit"], "Factor output unit"):
+        raise CandidateDiscoveryError("Factor output contract is unsupported")
+    warm_up = _object(task, "warm_up")
+    _keys(warm_up, {"periods", "behavior"}, "Factor warm-up")
+    if not isinstance(warm_up["periods"], int) or not 0 <= warm_up["periods"] <= 100_000:
+        raise CandidateDiscoveryError("Factor warm-up is invalid")
+    if warm_up["behavior"] not in {"emit_null", "reject"}:
+        raise CandidateDiscoveryError("Factor warm-up behavior is unsupported")
+    if task["missing_values"] not in {"propagate", "reject"}:
+        raise CandidateDiscoveryError("Factor missing-value policy is unsupported")
+
+
+def _validate_model_task(task: Mapping[str, Any]) -> None:
+    _keys(
+        task,
+        {
+            "kind",
+            "candidate_revision",
+            "features",
+            "label",
+            "windows",
+            "fit_timestamp",
+            "estimator",
+            "seeds",
+            "training_environment",
+        },
+        "Model task",
+    )
+    candidate = _object(task, "candidate_revision")
+    _keys(candidate, {"record_id", "record_type", "semantic_id"}, "candidate")
+    _sha(candidate["record_id"], "candidate record")
+    _sha(candidate["semantic_id"], "candidate semantic")
+    if candidate["record_type"] != "apex-research.model-candidate.v1":
+        raise CandidateDiscoveryError("Model task candidate type is invalid")
+    features = task["features"]
+    if not isinstance(features, list) or not features or len(features) > 256:
+        raise CandidateDiscoveryError("Model features are invalid")
+    names: set[str] = set()
+    factors: set[str] = set()
+    for item in features:
+        if not isinstance(item, Mapping):
+            raise CandidateDiscoveryError("Model feature must be an object")
+        feature = dict(item)
+        _keys(feature, {"feature_name", "factor_revision", "calculation"}, "Model feature")
+        name = _bounded(feature["feature_name"], "Model feature name")
+        factor = _object(feature, "factor_revision")
+        _keys(factor, {"record_id", "record_type", "semantic_id"}, "Factor revision")
+        _sha(factor["record_id"], "Factor revision")
+        _sha(factor["semantic_id"], "Factor semantic")
+        if factor["record_type"] != "apex-research.factor-candidate.v1":
+            raise CandidateDiscoveryError("Model feature Factor type is invalid")
+        if name in names or factor["record_id"] in factors:
+            raise CandidateDiscoveryError("Model features must be unique and canonical")
+        names.add(name)
+        factors.add(str(factor["record_id"]))
+        calculation = _object(feature, "calculation")
+        _validate_factor_calculation(calculation)
+    label = _object(task, "label")
+    _keys(label, {"field", "kind", "horizon", "frequency", "unit"}, "Model label")
+    _bounded(label["field"], "Model label field")
+    if (
+        label["kind"] not in {"forward_return", "forward_excess_return", "direction"}
+        or not isinstance(label["horizon"], int)
+        or not 1 <= label["horizon"] <= 10_000
+        or label["frequency"] not in {"1d", "1m"}
+        or not _bounded(label["unit"], "Model label unit")
+    ):
+        raise CandidateDiscoveryError("Model label is unsupported")
+    windows = _object(task, "windows")
+    _keys(windows, {"train", "validation", "test"}, "Model windows")
+    normalized_windows: list[tuple[pd.Timestamp, pd.Timestamp]] = []
+    for name in ("train", "validation", "test"):
+        window = _object(windows, name)
+        _keys(window, {"start", "end"}, f"Model {name} window")
+        try:
+            start = pd.Timestamp(_bounded(window["start"], "window start"), tz="UTC")
+            end = pd.Timestamp(_bounded(window["end"], "window end"), tz="UTC")
+        except Exception as exc:
+            raise CandidateDiscoveryError("Model window timestamp is invalid") from exc
+        if start > end:
+            raise CandidateDiscoveryError("Model window is reversed")
+        normalized_windows.append((start, end))
+    if not (
+        normalized_windows[0][1] < normalized_windows[1][0]
+        and normalized_windows[1][1] < normalized_windows[2][0]
+    ):
+        raise CandidateDiscoveryError("Model windows overlap or leak")
+    try:
+        fit_timestamp = pd.Timestamp(_bounded(task["fit_timestamp"], "fit timestamp"))
+        if fit_timestamp.tzinfo is None:
+            raise ValueError
+        fit_timestamp = fit_timestamp.tz_convert("UTC")
+    except Exception as exc:
+        raise CandidateDiscoveryError("Model fit timestamp is invalid") from exc
+    if not normalized_windows[0][1] < fit_timestamp <= normalized_windows[1][0]:
+        raise CandidateDiscoveryError("Model fit timestamp leaks validation data")
+    estimator = _object(task, "estimator")
+    _keys(estimator, {"kind", "hyperparameters"}, "Model estimator")
+    if estimator["kind"] != "ridge":
+        raise CandidateDiscoveryError("Model estimator is unsupported")
+    hyperparameters = _object(estimator, "hyperparameters")
+    _keys(hyperparameters, {"alpha", "fit_intercept"}, "Ridge hyperparameters")
+    if _finite_number(hyperparameters["alpha"], "Ridge alpha") < 0 or not isinstance(
+        hyperparameters["fit_intercept"], bool
+    ):
+        raise CandidateDiscoveryError("Ridge hyperparameters are invalid")
+    seeds = task["seeds"]
+    if not isinstance(seeds, list) or not seeds or len(seeds) > 64:
+        raise CandidateDiscoveryError("Model seeds are invalid")
+    previous: tuple[str, int] | None = None
+    for item in seeds:
+        if not isinstance(item, Mapping):
+            raise CandidateDiscoveryError("Model seed must be an object")
+        seed = dict(item)
+        _keys(seed, {"purpose", "value"}, "Model seed")
+        if seed["purpose"] not in {
+            "estimator",
+            "data_split",
+            "feature_selection",
+        } or not isinstance(seed["value"], int):
+            raise CandidateDiscoveryError("Model seed is invalid")
+        current = (str(seed["purpose"]), int(seed["value"]))
+        if previous is not None and current <= previous:
+            raise CandidateDiscoveryError("Model seeds must be unique and canonical")
+        previous = current
+    environment = _object(task, "training_environment")
+    _keys(
+        environment,
+        {
+            "runtime",
+            "runtime_version",
+            "platform",
+            "dependency_lock_sha256",
+            "container_image_sha256",
+        },
+        "training environment",
+    )
+    if (
+        environment["runtime"] != "cpython"
+        or environment["runtime_version"] != f"{sys.version_info.major}.{sys.version_info.minor}"
+        or environment["platform"] != "portable"
+        or environment["dependency_lock_sha256"] != CANDIDATE_DISCOVERY_LOCK_SHA256
+        or environment["container_image_sha256"] is not None
+    ):
+        raise CandidateDiscoveryError("Model training environment drifted")
+
+
+def _validate_factor_calculation(calculation: Mapping[str, Any]) -> None:
+    # The calculation contract is the Factor task minus its owner reference.
+    _keys(
+        calculation,
+        {"expression", "inputs", "output", "warm_up", "missing_values"},
+        "Factor calculation",
+    )
+    names: set[str] = set()
+    inputs = calculation["inputs"]
+    if not isinstance(inputs, list) or not inputs or len(inputs) > 64:
+        raise CandidateDiscoveryError("Factor inputs are invalid")
+    for item in inputs:
+        if not isinstance(item, Mapping):
+            raise CandidateDiscoveryError("Factor input must be an object")
+        current = dict(item)
+        _keys(
+            current,
+            {
+                "name",
+                "field",
+                "frequency",
+                "adjustment",
+                "as_of",
+                "lag_bars",
+                "unit",
+                "null_policy",
+            },
+            "Factor input",
+        )
+        name = _bounded(current["name"], "Factor input name")
+        _bounded(current["field"], "Factor input field")
+        if name in names:
+            raise CandidateDiscoveryError("Factor input names must be unique")
+        names.add(name)
+        if (
+            current["frequency"] not in {"1d", "1m"}
+            or current["adjustment"] not in {"none", "forward", "backward"}
+            or current["as_of"] not in {"decision_time", "prior_close"}
+            or not isinstance(current["lag_bars"], int)
+            or not 0 <= current["lag_bars"] <= 10_000
+            or current["null_policy"] not in {"reject", "allow"}
+        ):
+            raise CandidateDiscoveryError("Factor input semantics are unsupported")
+    _validate_expression(calculation["expression"], names, 0)
+    output = _object(calculation, "output")
+    _keys(output, {"dtype", "unit"}, "Factor output")
+    if output["dtype"] != "float64":
+        raise CandidateDiscoveryError("Factor output dtype is unsupported")
+    _bounded(output["unit"], "Factor output unit")
+    warm_up = _object(calculation, "warm_up")
+    _keys(warm_up, {"periods", "behavior"}, "Factor warm-up")
+    if (
+        not isinstance(warm_up["periods"], int)
+        or not 0 <= warm_up["periods"] <= 100_000
+        or warm_up["behavior"] not in {"emit_null", "reject"}
+        or calculation["missing_values"] not in {"propagate", "reject"}
+    ):
+        raise CandidateDiscoveryError("Factor calculation missing-data semantics are unsupported")
 
 
 def _factor_values(frame: pd.DataFrame, task: Mapping[str, Any]) -> pd.Series:

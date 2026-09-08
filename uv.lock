@@ -2357,11 +2357,13 @@ version = "0.2.7"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
+    { name = "joblib" },
     { name = "nautilus-trader" },
     { name = "pandas" },
     { name = "psutil" },
     { name = "pyarrow" },
     { name = "pyqlib" },
+    { name = "scikit-learn" },
     { name = "strategy-workspace" },
 ]
 
@@ -2375,6 +2377,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = "==0.28.1" },
+    { name = "joblib", specifier = "==1.5.3" },
     { name = "nautilus-trader", specifier = "==1.231.0" },
     { name = "pandas", specifier = "==2.3.3" },
     { name = "psutil", specifier = "==7.0.0" },
@@ -2383,6 +2386,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = "==8.4.1" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = "==6.2.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.12.9" },
+    { name = "scikit-learn", specifier = "==1.9.0" },
     { name = "strategy-workspace", editable = "../strategy-workspace" },
 ]
 provides-extras = ["dev"]
