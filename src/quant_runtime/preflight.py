@@ -56,13 +56,30 @@ class RuntimePreflight:
             )
             required_semantics = _required_semantics(snapshot_value)
             as_of = _as_of(snapshot_value)
-            frozen_snapshot = self.data_adapter.freeze_reference(
-                request,
-                as_of=as_of,
-                required_semantics=required_semantics,
+            versioned_observation = (
+                value["schema"] == "quant-research.runtime-preflight-request.v4"
             )
-            return {
-                "schema": "quant-research.runtime-preflight-result.v1",
+            if versioned_observation:
+                frozen_snapshot, observation = (
+                    self.data_adapter.freeze_reference_with_observation(
+                        request,
+                        as_of=as_of,
+                        required_semantics=required_semantics,
+                    )
+                )
+            else:
+                frozen_snapshot = self.data_adapter.freeze_reference(
+                    request,
+                    as_of=as_of,
+                    required_semantics=required_semantics,
+                )
+                observation = None
+            result = {
+                "schema": (
+                    "quant-research.runtime-preflight-result.v2"
+                    if versioned_observation
+                    else "quant-research.runtime-preflight-result.v1"
+                ),
                 "status": "accepted",
                 "frozen_snapshot": frozen_snapshot,
                 "evidence": {
@@ -80,6 +97,9 @@ class RuntimePreflight:
                     ),
                 },
             }
+            if observation is not None:
+                result["observation"] = observation
+            return result
         except PreflightRequestError as exc:
             return _failure("request_invalid", "preflight_request_invalid", str(exc))
         except MarketHubContractError as exc:
@@ -116,10 +136,20 @@ def validate_frozen_transport(
     """Validate frozen transport integrity without touching any external owner."""
 
     value = _draft(draft)
-    expected_result_fields = {"schema", "status", "frozen_snapshot", "evidence"}
+    versioned_observation = (
+        value["schema"] == "quant-research.runtime-preflight-request.v4"
+    )
+    expected_result_fields = {"schema", "status", "frozen_snapshot", "evidence"} | (
+        {"observation"} if versioned_observation else set()
+    )
     if (
         set(result) != expected_result_fields
-        or result.get("schema") != "quant-research.runtime-preflight-result.v1"
+        or result.get("schema")
+        != (
+            "quant-research.runtime-preflight-result.v2"
+            if versioned_observation
+            else "quant-research.runtime-preflight-result.v1"
+        )
         or result.get("status") != "accepted"
     ):
         raise PreflightRequestError("frozen preflight result is invalid")
@@ -181,6 +211,8 @@ def validate_frozen_transport(
         or evidence.get("behavioral_conformance") != value["behavioral_conformance"]
     ):
         raise PreflightRequestError("frozen preflight evidence does not match the request")
+    if versioned_observation:
+        _validate_data_observation(result.get("observation"), snapshot_value)
     return value, request
 
 
@@ -267,6 +299,66 @@ def _validate_frozen_snapshot_shape(snapshot: Mapping[str, Any]) -> None:
         raise PreflightRequestError("frozen snapshot resolution time is invalid") from exc
 
 
+def _validate_data_observation(value: object, snapshot: Mapping[str, Any]) -> None:
+    required = {
+        "schema",
+        "status",
+        "as_of",
+        "sample_count",
+        "instrument_sample_counts",
+        "data_revision",
+        "data_version",
+        "dataset_version",
+        "catalog_hash",
+        "calendar_hash",
+        "coverage_hash",
+        "reason",
+    }
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != required
+        or value.get("schema") != "quant-runtime.data-change-observation.v1"
+        or value.get("status") != "evaluated"
+        or value.get("as_of") != snapshot.get("as_of")
+    ):
+        raise PreflightRequestError("Runtime data observation is invalid")
+    source = snapshot["source"]
+    verification = snapshot["verification"]
+    assert isinstance(source, Mapping)
+    assert isinstance(verification, Mapping)
+    if (
+        value.get("data_revision") != source.get("data_revision")
+        or value.get("data_version") != verification.get("data_version")
+        or value.get("dataset_version") != verification.get("dataset_version")
+        or any(value.get(name) != verification.get(name) for name in (
+            "catalog_hash",
+            "calendar_hash",
+            "coverage_hash",
+        ))
+    ):
+        raise PreflightRequestError("Runtime data observation identity drifted")
+    counts = value.get("instrument_sample_counts")
+    if not isinstance(counts, list):
+        raise PreflightRequestError("Runtime data observation counts are invalid")
+    normalized: list[tuple[str, int]] = []
+    for item in counts:
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != {"instrument", "sample_count"}
+            or not isinstance(item.get("instrument"), str)
+            or not item["instrument"]
+            or not isinstance(item.get("sample_count"), int)
+            or isinstance(item["sample_count"], bool)
+            or item["sample_count"] < 0
+        ):
+            raise PreflightRequestError("Runtime data observation counts are invalid")
+        normalized.append((str(item["instrument"]), int(item["sample_count"])))
+    if normalized != sorted(set(normalized)):
+        raise PreflightRequestError("Runtime data observation counts are not canonical")
+    if value.get("sample_count") != sum(count for _, count in normalized):
+        raise PreflightRequestError("Runtime data observation total is invalid")
+
+
 def _validate_local_request(
     client: WorkspacePreflightClientPort,
     registry: AdapterRegistry,
@@ -318,9 +410,13 @@ def _draft(value: Mapping[str, Any]) -> dict[str, Any]:
         "quant-research.runtime-preflight-request.v1",
         "quant-research.runtime-preflight-request.v2",
         "quant-research.runtime-preflight-request.v3",
+        "quant-research.runtime-preflight-request.v4",
     }:
         raise PreflightRequestError("preflight draft schema is invalid")
-    if draft["schema"].endswith(".v1") and set(draft) != base:
+    if draft["schema"] in {
+        "quant-research.runtime-preflight-request.v1",
+        "quant-research.runtime-preflight-request.v4",
+    } and set(draft) != base:
         raise PreflightRequestError("legacy preflight draft cannot carry sandbox fields")
     if (
         draft["schema"]

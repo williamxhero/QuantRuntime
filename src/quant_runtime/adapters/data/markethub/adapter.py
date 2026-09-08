@@ -96,6 +96,22 @@ class MarketHubDataAdapter:
     ) -> dict[str, Any]:
         """Return an in-memory, verified reference without publishing any state."""
 
+        snapshot, _ = self.freeze_reference_with_observation(
+            request,
+            as_of=as_of,
+            required_semantics=required_semantics,
+        )
+        return snapshot
+
+    def freeze_reference_with_observation(
+        self,
+        request: SnapshotRequest,
+        *,
+        as_of: str,
+        required_semantics: tuple[str, ...],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Freeze a reference and expose only Runtime-owned canonical sample facts."""
+
         if request.snapshot_mode != "reference" or request.trust_policy != "verified_immutable":
             raise MarketHubContractError(
                 "preflight requires a verified immutable MarketHub reference snapshot"
@@ -143,7 +159,7 @@ class MarketHubDataAdapter:
             "data_semantics": semantics,
             "verification": verification.manifest_value,
         }
-        return {
+        snapshot = {
             "schema": "quant-research.market-snapshot-ref.v2",
             "snapshot_id": f"sha256:{sha256_value(identity)}",
             "mode": "reference",
@@ -158,6 +174,35 @@ class MarketHubDataAdapter:
             "verification": verification.manifest_value,
             "resolved_at": _now(),
         }
+        counts = (
+            verification.dataset.bar_counts
+            if isinstance(verification.dataset, CanonicalFuturesDataset)
+            else {
+                instrument.instrument: sum(
+                    bar.instrument == instrument.instrument
+                    for bar in verification.dataset.bars
+                )
+                for instrument in verification.dataset.instruments
+            }
+        )
+        observation = {
+            "schema": "quant-runtime.data-change-observation.v1",
+            "status": "evaluated",
+            "as_of": as_of,
+            "sample_count": sum(counts.values()),
+            "instrument_sample_counts": [
+                {"instrument": instrument, "sample_count": count}
+                for instrument, count in sorted(counts.items())
+            ],
+            "data_revision": revision,
+            "data_version": verification.dataset.data_version,
+            "dataset_version": verification.dataset.dataset_version,
+            "catalog_hash": verification.manifest_value["catalog_hash"],
+            "calendar_hash": verification.manifest_value["calendar_hash"],
+            "coverage_hash": verification.manifest_value["coverage_hash"],
+            "reason": "Runtime observed exact canonical MarketHub samples",
+        }
+        return snapshot, observation
 
     def open_snapshot(
         self,

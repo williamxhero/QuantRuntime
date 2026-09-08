@@ -81,6 +81,39 @@ def test_preflight_returns_a_stable_frozen_value_without_workspace_side_effects(
     assert client.list_records() == []
 
 
+def test_versioned_preflight_exposes_runtime_owned_sample_observation(
+    tmp_path: Path, market_fixture: dict
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = WorkspaceClient(workspace)
+    package = client.register_package(PACKAGE)
+    request = draft(package["package_ref"])
+    request["schema"] = "quant-research.runtime-preflight-request.v4"
+
+    result = preflight(workspace, market_fixture).preflight(request)
+
+    assert result["schema"] == "quant-research.runtime-preflight-result.v2"
+    assert result["status"] == "accepted"
+    assert result["frozen_snapshot"]["schema"] == "quant-research.market-snapshot-ref.v2"
+    assert result["observation"] == {
+        "schema": "quant-runtime.data-change-observation.v1",
+        "status": "evaluated",
+        "as_of": "2025-02-01T00:00:00Z",
+        "sample_count": 6,
+        "instrument_sample_counts": [
+            {"instrument": "SH.600000", "sample_count": 3},
+            {"instrument": "SZ.000001", "sample_count": 3},
+        ],
+        "data_revision": "fixture-global-v1:fixture-daily-v1",
+        "data_version": "fixture-global-v1",
+        "dataset_version": "fixture-daily-v1",
+        "catalog_hash": result["frozen_snapshot"]["verification"]["catalog_hash"],
+        "calendar_hash": result["frozen_snapshot"]["verification"]["calendar_hash"],
+        "coverage_hash": result["frozen_snapshot"]["verification"]["coverage_hash"],
+        "reason": "Runtime observed exact canonical MarketHub samples",
+    }
+
+
 def test_preflight_failure_is_classified_and_leaves_workspace_unchanged(
     tmp_path: Path, market_fixture: dict
 ) -> None:
