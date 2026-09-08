@@ -156,6 +156,7 @@ def runtime_capabilities() -> dict[str, Any]:
             "benchmark-exec.v1",
             "benchmark-exec.v2",
             "candidate-discovery.v1",
+            "candidate-discovery-lock-sha256:7708d1ecc05e2a4bc6d4835b31b8eb518e81117f9bda5124dbc807ed1c49f77d",
             "frozen-preflight.v1",
             "preflight.v1",
             "run.v1",
