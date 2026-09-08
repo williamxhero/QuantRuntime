@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import platform
 from pathlib import Path
 
 import pytest
@@ -89,13 +90,16 @@ def _factor_request(artifact: dict[str, object]) -> dict[str, object]:
             "inputs": [
                 {
                     "name": "close",
-                    "field": "close",
+                    "field_id": "market.close",
+                    "capability": "data.bar.1d",
+                    "column": "close",
                     "frequency": "1d",
                     "adjustment": "none",
                     "as_of": "decision_time",
                     "lag_bars": 0,
                     "unit": "price",
                     "null_policy": "reject",
+                    "required_semantics": [{"dimension": "point_in_time", "required": True}],
                 }
             ],
             "output": {"dtype": "float64", "unit": "price"},
@@ -147,6 +151,7 @@ def _model_request(artifact: dict[str, object]) -> dict[str, object]:
             }
         ],
         "label": {
+            "registry": "apex-research.label-registry.v1",
             "field": "forward_return",
             "kind": "forward_return",
             "horizon": 1,
@@ -158,19 +163,24 @@ def _model_request(artifact: dict[str, object]) -> dict[str, object]:
             "validation": {"start": "2022-01-01", "end": "2022-12-31"},
             "test": {"start": "2023-01-01", "end": "2023-12-31"},
         },
-        "fit_timestamp": "2022-01-01T00:00:00Z",
+        "fit_timestamp": {
+            "policy": "after_training_window",
+            "timestamp": "2022-01-01T00:00:00Z",
+        },
         "estimator": {
+            "registry": "apex-research.estimator-registry.v1",
             "kind": "ridge",
             "hyperparameters": {"alpha": 1.0, "fit_intercept": True},
         },
         "seeds": [{"purpose": "estimator", "value": 7}],
         "training_environment": {
             "runtime": "cpython",
-            "runtime_version": "3.12",
+            "runtime_version": platform.python_version(),
             "platform": "portable",
             "dependency_lock_sha256": CANDIDATE_DISCOVERY_LOCK_SHA256,
             "container_image_sha256": None,
         },
+        "source_artifact": artifact,
     }
     return request
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import math
+import platform
 import sys
 from collections.abc import Mapping
 from decimal import Decimal
@@ -42,6 +43,7 @@ class CandidateDiscoveryService:
         self._require_candidate(candidate)
         frame = self._read_frame(_object(request, "data"), _object(request, "limits"))
         if task["kind"] == "model":
+            self._verify_bound_artifact(_object(task, "source_artifact"))
             return self._execute_model(request, request_id, task, candidate, frame)
         values = _factor_values(frame, task)
         output = frame[
@@ -390,6 +392,11 @@ class CandidateDiscoveryService:
         ):
             raise CandidateDiscoveryError("candidate owner reference mismatch")
 
+    def _verify_bound_artifact(self, artifact: Mapping[str, Any]) -> None:
+        verification = self._workspace.verify_artifact(str(artifact["uri"]))
+        if verification.get("sha256") != artifact["sha256"]:
+            raise CandidateDiscoveryError("Model source artifact verification failed")
+
     def _read_frame(self, data: Mapping[str, Any], limits: Mapping[str, Any]) -> pd.DataFrame:
         artifact = _object(data, "artifact")
         verification = self._workspace.verify_artifact(str(artifact["uri"]))
@@ -505,6 +512,35 @@ def _request(value: Mapping[str, Any]) -> dict[str, Any]:
     return request
 
 
+def _validate_artifact(artifact: Mapping[str, Any], label: str) -> None:
+    _keys(
+        artifact,
+        {
+            "schema",
+            "uri",
+            "sha256",
+            "bytes",
+            "media_type",
+            "record_schema",
+            "logical_role",
+            "name",
+        },
+        label,
+    )
+    digest = _sha(artifact["sha256"], label)
+    if (
+        artifact["schema"] != "quant-research.artifact-ref.v1"
+        or artifact["uri"] != f"workspace-artifact://sha256/{digest}"
+        or not isinstance(artifact["bytes"], int)
+        or artifact["bytes"] < 1
+    ):
+        raise CandidateDiscoveryError(f"{label} is invalid")
+    for name in ("media_type", "logical_role", "name"):
+        _bounded(artifact[name], f"{label} {name}")
+    if artifact["record_schema"] is not None:
+        _bounded(artifact["record_schema"], f"{label} record schema")
+
+
 def _validate_factor_task(task: Mapping[str, Any]) -> None:
     _keys(
         task,
@@ -539,19 +575,24 @@ def _validate_factor_task(task: Mapping[str, Any]) -> None:
             current,
             {
                 "name",
-                "field",
+                "field_id",
+                "capability",
+                "column",
                 "frequency",
                 "adjustment",
                 "as_of",
                 "lag_bars",
                 "unit",
                 "null_policy",
+                "required_semantics",
             },
             "Factor input",
         )
         name = _bounded(current["name"], "Factor input name")
-        field = _bounded(current["field"], "Factor input field")
-        if name in names or field.startswith("__"):
+        field_id = _bounded(current["field_id"], "Factor field identity")
+        _bounded(current["capability"], "Factor capability")
+        column = _bounded(current["column"], "Factor input column")
+        if name in names or field_id.startswith("__") or column.startswith("__"):
             raise CandidateDiscoveryError("Factor input names must be unique and safe")
         names.add(name)
         if current["frequency"] not in {"1d", "1m"}:
@@ -564,6 +605,7 @@ def _validate_factor_task(task: Mapping[str, Any]) -> None:
             raise CandidateDiscoveryError("Factor lag is invalid")
         if current["null_policy"] not in {"reject", "allow"}:
             raise CandidateDiscoveryError("Factor null policy is unsupported")
+        _validate_required_semantics(current["required_semantics"])
     _validate_expression(task["expression"], names, 0)
     output = _object(task, "output")
     _keys(output, {"dtype", "unit"}, "Factor output")
@@ -592,6 +634,7 @@ def _validate_model_task(task: Mapping[str, Any]) -> None:
             "estimator",
             "seeds",
             "training_environment",
+            "source_artifact",
         },
         "Model task",
     )
@@ -625,10 +668,15 @@ def _validate_model_task(task: Mapping[str, Any]) -> None:
         calculation = _object(feature, "calculation")
         _validate_factor_calculation(calculation)
     label = _object(task, "label")
-    _keys(label, {"field", "kind", "horizon", "frequency", "unit"}, "Model label")
+    _keys(
+        label,
+        {"registry", "field", "kind", "horizon", "frequency", "unit"},
+        "Model label",
+    )
     _bounded(label["field"], "Model label field")
     if (
-        label["kind"] not in {"forward_return", "forward_excess_return", "direction"}
+        label["registry"] != "apex-research.label-registry.v1"
+        or label["kind"] not in {"forward_return", "forward_excess_return", "direction"}
         or not isinstance(label["horizon"], int)
         or not 1 <= label["horizon"] <= 10_000
         or label["frequency"] not in {"1d", "1m"}
@@ -654,8 +702,12 @@ def _validate_model_task(task: Mapping[str, Any]) -> None:
         and normalized_windows[1][1] < normalized_windows[2][0]
     ):
         raise CandidateDiscoveryError("Model windows overlap or leak")
+    fit = _object(task, "fit_timestamp")
+    _keys(fit, {"policy", "timestamp"}, "Model fit policy")
+    if fit["policy"] != "after_training_window":
+        raise CandidateDiscoveryError("Model fit policy is unsupported")
     try:
-        fit_timestamp = pd.Timestamp(_bounded(task["fit_timestamp"], "fit timestamp"))
+        fit_timestamp = pd.Timestamp(_bounded(fit["timestamp"], "fit timestamp"))
         if fit_timestamp.tzinfo is None:
             raise ValueError
         fit_timestamp = fit_timestamp.tz_convert("UTC")
@@ -664,8 +716,11 @@ def _validate_model_task(task: Mapping[str, Any]) -> None:
     if not normalized_windows[0][1] < fit_timestamp <= normalized_windows[1][0]:
         raise CandidateDiscoveryError("Model fit timestamp leaks validation data")
     estimator = _object(task, "estimator")
-    _keys(estimator, {"kind", "hyperparameters"}, "Model estimator")
-    if estimator["kind"] != "ridge":
+    _keys(estimator, {"registry", "kind", "hyperparameters"}, "Model estimator")
+    if (
+        estimator["registry"] != "apex-research.estimator-registry.v1"
+        or estimator["kind"] != "ridge"
+    ):
         raise CandidateDiscoveryError("Model estimator is unsupported")
     hyperparameters = _object(estimator, "hyperparameters")
     _keys(hyperparameters, {"alpha", "fit_intercept"}, "Ridge hyperparameters")
@@ -706,12 +761,13 @@ def _validate_model_task(task: Mapping[str, Any]) -> None:
     )
     if (
         environment["runtime"] != "cpython"
-        or environment["runtime_version"] != f"{sys.version_info.major}.{sys.version_info.minor}"
+        or environment["runtime_version"] != platform.python_version()
         or environment["platform"] != "portable"
         or environment["dependency_lock_sha256"] != CANDIDATE_DISCOVERY_LOCK_SHA256
         or environment["container_image_sha256"] is not None
     ):
         raise CandidateDiscoveryError("Model training environment drifted")
+    _validate_artifact(_object(task, "source_artifact"), "Model source artifact")
 
 
 def _validate_factor_calculation(calculation: Mapping[str, Any]) -> None:
@@ -733,18 +789,23 @@ def _validate_factor_calculation(calculation: Mapping[str, Any]) -> None:
             current,
             {
                 "name",
-                "field",
+                "field_id",
+                "capability",
+                "column",
                 "frequency",
                 "adjustment",
                 "as_of",
                 "lag_bars",
                 "unit",
                 "null_policy",
+                "required_semantics",
             },
             "Factor input",
         )
         name = _bounded(current["name"], "Factor input name")
-        _bounded(current["field"], "Factor input field")
+        _bounded(current["field_id"], "Factor field identity")
+        _bounded(current["capability"], "Factor capability")
+        _bounded(current["column"], "Factor input column")
         if name in names:
             raise CandidateDiscoveryError("Factor input names must be unique")
         names.add(name)
@@ -757,6 +818,7 @@ def _validate_factor_calculation(calculation: Mapping[str, Any]) -> None:
             or current["null_policy"] not in {"reject", "allow"}
         ):
             raise CandidateDiscoveryError("Factor input semantics are unsupported")
+        _validate_required_semantics(current["required_semantics"])
     _validate_expression(calculation["expression"], names, 0)
     output = _object(calculation, "output")
     _keys(output, {"dtype", "unit"}, "Factor output")
@@ -777,7 +839,7 @@ def _validate_factor_calculation(calculation: Mapping[str, Any]) -> None:
 def _factor_values(frame: pd.DataFrame, task: Mapping[str, Any]) -> pd.Series:
     sources: dict[str, pd.Series] = {}
     for item in task["inputs"]:
-        field = str(item["field"])
+        field = str(item["column"])
         if field not in frame.columns:
             raise CandidateDiscoveryError(f"frozen market frame lacks Factor field {field!r}")
         values = pd.to_numeric(frame[field], errors="coerce")
@@ -795,6 +857,28 @@ def _factor_values(frame: pd.DataFrame, task: Mapping[str, Any]) -> pd.Series:
     if not bool(finite.all()):
         raise CandidateDiscoveryError("Factor output contains non-finite values")
     return result.astype(float)
+
+
+def _validate_required_semantics(value: object) -> None:
+    if not isinstance(value, list) or len(value) > 16:
+        raise CandidateDiscoveryError("Factor required semantics are invalid")
+    dimensions: list[str] = []
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise CandidateDiscoveryError("Factor required semantic must be an object")
+        current = dict(item)
+        _keys(current, {"dimension", "required"}, "Factor required semantic")
+        dimension = _bounded(current["dimension"], "Factor semantic dimension")
+        if dimension not in {
+            "field_availability",
+            "point_in_time",
+            "time",
+            "provider_lineage",
+        } or not isinstance(current["required"], bool):
+            raise CandidateDiscoveryError("Factor required semantic is unsupported")
+        dimensions.append(dimension)
+    if dimensions != sorted(set(dimensions)):
+        raise CandidateDiscoveryError("Factor required semantics must be unique and canonical")
 
 
 def _validate_expression(value: object, names: set[str], depth: int) -> None:
