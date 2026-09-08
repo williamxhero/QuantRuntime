@@ -11,6 +11,7 @@ from strategy_workspace import WorkspaceClient, WorkspaceWorker
 from quant_runtime import __version__
 from quant_runtime.artifacts import sha256_value
 from quant_runtime.benchmark import BenchmarkExecutionService
+from quant_runtime.candidate_discovery import CandidateDiscoveryService
 from quant_runtime.conformance import RuntimeConformance
 from quant_runtime.executor import RuntimeExecutor
 from quant_runtime.preflight import (
@@ -38,6 +39,12 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("capabilities", help="print immutable CLI transport capabilities")
+
+    discovery = commands.add_parser(
+        "candidate-discovery", help="execute one closed declarative Factor or Model discovery plan"
+    )
+    discovery.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
+    discovery.add_argument("--request", type=Path, required=True)
 
     preflight = commands.add_parser(
         "preflight", help="validate and freeze a draft request without submitting a Workspace run"
@@ -81,6 +88,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         arguments = build_parser().parse_args(argv)
         if arguments.command == "capabilities":
             payload = runtime_capabilities()
+            exit_code = 0
+        elif arguments.command == "candidate-discovery":
+            payload = CandidateDiscoveryService(WorkspaceClient(arguments.workspace)).execute(
+                read_transport_json(arguments.request)
+            )
             exit_code = 0
         elif arguments.command == "preflight":
             payload = _preflight(arguments.workspace, arguments.request)
@@ -143,6 +155,7 @@ def runtime_capabilities() -> dict[str, Any]:
         "capabilities": [
             "benchmark-exec.v1",
             "benchmark-exec.v2",
+            "candidate-discovery.v1",
             "frozen-preflight.v1",
             "preflight.v1",
             "run.v1",
