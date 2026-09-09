@@ -34,12 +34,14 @@ quant-runtime = "quant_runtime.cli:main"
 packages = ["src/quant_runtime"]
 
 [tool.pytest.ini_options]
-addopts = "-ra"
+addopts = '-ra -m "not slow and not oci and not connected and not release"'
 testpaths = ["tests"]
 markers = [
   "connected: requires the live yosef-server MarketHub endpoint",
   "engine: requires the pinned NautilusTrader runtime",
   "oci: requires the pinned Docker Engine Linux OCI backend",
+  "release: runs only at a release-train gate",
+  "slow: exceeds the ordinary 2-second case or 60-second file budget",
 ]
 
 [tool.uv.sources]
