@@ -87,6 +87,122 @@ class MarketHubDataAdapter:
             "materialized snapshots must be published as Strategy Workspace ArtifactRefs"
         )
 
+    def freeze_reference(
+        self,
+        request: SnapshotRequest,
+        *,
+        as_of: str,
+        required_semantics: tuple[str, ...],
+    ) -> dict[str, Any]:
+        """Return an in-memory, verified reference without publishing any state."""
+
+        snapshot, _ = self.freeze_reference_with_observation(
+            request,
+            as_of=as_of,
+            required_semantics=required_semantics,
+        )
+        return snapshot
+
+    def freeze_reference_with_observation(
+        self,
+        request: SnapshotRequest,
+        *,
+        as_of: str,
+        required_semantics: tuple[str, ...],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Freeze a reference and expose only Runtime-owned canonical sample facts."""
+
+        if request.snapshot_mode != "reference" or request.trust_policy != "verified_immutable":
+            raise MarketHubContractError(
+                "preflight requires a verified immutable MarketHub reference snapshot"
+            )
+        verification = self.read(request)
+        semantics = {
+            "field_availability": {
+                "status": "verified",
+                "reason": "MarketHub returned canonical fields for the exact request",
+            },
+            "point_in_time": {
+                "status": "not_evaluated",
+                "reason": (
+                    "the published MarketHub contract does not expose historical field availability"
+                ),
+            },
+            "time": {
+                "status": "verified",
+                "reason": "MarketHub calendar and ordered canonical bars were verified",
+            },
+            "provider_lineage": {
+                "status": "not_evaluated",
+                "reason": (
+                    "the published MarketHub contract does not expose raw-field provider lineage"
+                ),
+            },
+        }
+        for name in required_semantics:
+            if semantics[name]["status"] != "verified":
+                raise MarketHubContractError(
+                    f"required data semantic is not available: {name}={semantics[name]['status']}"
+                )
+        revision = (
+            verification.dataset.reference_revision
+            if isinstance(verification.dataset, CanonicalFuturesDataset)
+            else f"{verification.dataset.data_version}:{verification.dataset.dataset_version}"
+        )
+        source = self._source(request, revision)
+        identity = {
+            **request.identity_payload(),
+            "source": source,
+            "trust_policy": "verified_immutable",
+            "as_of": as_of,
+            "required_semantics": list(required_semantics),
+            "data_semantics": semantics,
+            "verification": verification.manifest_value,
+        }
+        snapshot = {
+            "schema": "quant-research.market-snapshot-ref.v2",
+            "snapshot_id": f"sha256:{sha256_value(identity)}",
+            "mode": "reference",
+            "trust_policy": "verified_immutable",
+            "source": source,
+            "query": identity["query"],
+            "calendar": request.calendar,
+            "contract_mapping": request.contract_mapping,
+            "as_of": as_of,
+            "required_semantics": list(required_semantics),
+            "data_semantics": semantics,
+            "verification": verification.manifest_value,
+            "resolved_at": _now(),
+        }
+        counts = (
+            verification.dataset.bar_counts
+            if isinstance(verification.dataset, CanonicalFuturesDataset)
+            else {
+                instrument.instrument: sum(
+                    bar.instrument == instrument.instrument for bar in verification.dataset.bars
+                )
+                for instrument in verification.dataset.instruments
+            }
+        )
+        observation = {
+            "schema": "quant-runtime.data-change-observation.v1",
+            "status": "evaluated",
+            "as_of": as_of,
+            "sample_count": sum(counts.values()),
+            "instrument_sample_counts": [
+                {"instrument": instrument, "sample_count": count}
+                for instrument, count in sorted(counts.items())
+            ],
+            "data_revision": revision,
+            "data_version": verification.dataset.data_version,
+            "dataset_version": verification.dataset.dataset_version,
+            "catalog_hash": verification.manifest_value["catalog_hash"],
+            "calendar_hash": verification.manifest_value["calendar_hash"],
+            "coverage_hash": verification.manifest_value["coverage_hash"],
+            "reason": "Runtime observed exact canonical MarketHub samples",
+        }
+        return snapshot, observation
+
     def open_snapshot(
         self,
         manifest: dict[str, Any],

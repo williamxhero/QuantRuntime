@@ -46,7 +46,7 @@ class FormalOutput:
                 "positions": self.positions,
                 "account_curve": self.account_curve,
                 "fees": self.fees,
-                "native_statistics": self.native_statistics,
+                "native_statistics": _semantic_statistics(self.native_statistics),
             }
         )
 
@@ -83,3 +83,18 @@ def normalize_value(value: Any) -> Any:
     if isinstance(value, list | tuple):
         return [normalize_value(item) for item in value]
     return value
+
+
+def _semantic_statistics(value: dict[str, Any]) -> dict[str, Any]:
+    result = normalize_value(value)
+    run_info = result.get("run_info")
+    if isinstance(run_info, dict):
+        for key in (
+            "instance_id",
+            "machine_id",
+            "run_id",
+            "run_started",
+            "run_finished",
+        ):
+            run_info.pop(key, None)
+    return result

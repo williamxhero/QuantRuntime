@@ -57,6 +57,15 @@ def test_nautilus_preserves_native_evidence_and_observed_bar_decisions(
     )
     normalized_payload = client.read_artifact(normalized_ref["uri"])
     normalized = json.loads(base64.b64decode(normalized_payload["content"]))
+    assert {
+        "instance_id",
+        "machine_id",
+        "run_id",
+        "run_started",
+        "run_finished",
+    } <= statistics["run_info"].keys()
+    for key in ("instance_id", "machine_id", "run_id", "run_started", "run_finished"):
+        statistics["run_info"].pop(key)
     assert normalized["native_statistics"] == statistics
     decision_ref = next(
         item for item in evidence if item["name"].endswith("strategy_decisions.json")

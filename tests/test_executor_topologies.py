@@ -196,6 +196,7 @@ def test_run_identity_binds_request_snapshot_topology_and_engine_versions(
     submitted = client.submit_run(request(package["package_ref"], "formal_only"))
     completed = executor(workspace, market_fixture).execute(submitted["run_id"])
     identity = completed["attempts"][0]["runtime_identity"]
+    assert identity["schema"] == "quant-runtime.identity.v2"
     assert identity["request_id"] == submitted["run_id"]
     assert identity["strategy_package"] == package["package_ref"]
     assert identity["snapshot_id"] == snapshot()["snapshot_id"]

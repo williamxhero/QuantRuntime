@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import tarfile
 from collections.abc import Mapping
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Protocol
 
@@ -11,21 +10,48 @@ from quant_runtime.adapters.data.markethub import (
     MarketHubDataAdapter,
     ResolvedSnapshot,
 )
+from quant_runtime.adapters.discovery.qlib.capsule import (
+    build_discovery_capsule,
+    capsule_bytes,
+)
 from quant_runtime.adapters.formal.nautilus.reporting_input import REPORTING_INPUT_SCHEMA
-from quant_runtime.adapters.interface import DiscoveryRunInput, FormalAdapterResult, FormalRunInput
-from quant_runtime.artifacts import sha256_bytes, sha256_value, write_json
+from quant_runtime.adapters.interface import (
+    DiscoveryAdapterResult,
+    DiscoveryRunInput,
+    FormalAdapterResult,
+    FormalRunInput,
+)
+from quant_runtime.artifacts import canonical_json, sha256_bytes, sha256_value, write_json
 from quant_runtime.capabilities import AdapterRegistry, ExecutionPlan, FormalExecution
 from quant_runtime.comparison import compare_results
+from quant_runtime.materialization import VerifiedPackageMaterializer
 from quant_runtime.package import StrategyPackage
 from quant_runtime.registry import production_registry
+from quant_runtime.sandbox import SandboxRunner
+from quant_runtime.sandbox.oci import production_backend
+from quant_runtime.sandbox.outcome import bounded_diagnostics, sandbox_outcome, workspace_run_error
+from quant_runtime.sandbox.policy import SandboxPolicyError, SandboxPolicyRegistry
+from quant_runtime.sandbox.snapshot import (
+    build_snapshot_capsule,
+    snapshot_capsule_bytes,
+)
 
 WORKER_ID = "quant-runtime/0.2.3"
+
+
+class SandboxAttemptFailure(RuntimeError):
+    def __init__(self, outcome: Mapping[str, Any]) -> None:
+        super().__init__("sandbox attempt failed")
+        self.outcome = dict(outcome)
 
 
 class WorkspaceClientPort(Protocol):
     def get_run(self, run_id: str) -> dict[str, Any]: ...
     def verify_artifact(self, artifact_uri: str) -> dict[str, Any]: ...
     def materialize_artifact(self, artifact_uri: str, destination: Path) -> dict[str, Any]: ...
+    def publish_record(
+        self, record: Mapping[str, Any], *, artifacts: tuple[Mapping[str, Any], ...] = ()
+    ) -> dict[str, Any]: ...
 
 
 class WorkspaceWorkerPort(Protocol):
@@ -59,12 +85,17 @@ class RuntimeExecutor:
         registry: AdapterRegistry | None = None,
         data_adapter: MarketHubDataAdapter | None = None,
         worker_id: str = WORKER_ID,
+        sandbox_backend: Any | None = None,
+        sandbox_policy_registry: SandboxPolicyRegistry | None = None,
     ) -> None:
         self.client = client
         self.worker = worker
         self.registry = registry or production_registry()
         self.data_adapter = data_adapter or MarketHubDataAdapter()
         self.worker_id = worker_id
+        self.sandbox_backend = sandbox_backend
+        self.sandbox_policy_registry = sandbox_policy_registry or SandboxPolicyRegistry()
+        self.package_materializer = VerifiedPackageMaterializer(client)
 
     def execute(self, request_id: str) -> dict[str, Any]:
         run = self.client.get_run(request_id)
@@ -79,7 +110,7 @@ class RuntimeExecutor:
             with TemporaryDirectory(prefix=f"quant-runtime-{attempt_id}-") as temporary:
                 root = Path(temporary)
                 run = self.client.get_run(request_id)
-                package = self._materialize_package(run["package"], root / "package")
+                package = self.package_materializer.materialize(run["package"], root / "package")
                 request = _object(run, "request")
                 if _object(request, "strategy_package") != package.package_ref:
                     raise ValueError("hydrated package differs from the immutable run request")
@@ -101,6 +132,7 @@ class RuntimeExecutor:
                 )
                 identity = self._identity(
                     run,
+                    request=request,
                     package=package,
                     parameters=parameters,
                     snapshot=snapshot,
@@ -118,6 +150,8 @@ class RuntimeExecutor:
                     storage=storage,
                     request_hash=str(run["request_hash"]),
                     identity=identity,
+                    package_record=_object(run, "package"),
+                    request=request,
                 )
                 if result["outcome"] == "rejected":
                     return self.worker.reject_attempt(
@@ -130,6 +164,8 @@ class RuntimeExecutor:
                     result,
                     artifacts=artifact_specs,
                 )
+        except SandboxAttemptFailure as exc:
+            return self.worker.fail_attempt(request_id, workspace_run_error(exc.outcome))
         except Exception as exc:
             return self.worker.fail_attempt(
                 request_id,
@@ -146,21 +182,6 @@ class RuntimeExecutor:
                 },
             )
 
-    def _materialize_package(self, record: dict[str, Any], root: Path) -> StrategyPackage:
-        bundle = _object(record, "bundle")
-        uri = str(bundle.get("uri", ""))
-        if not uri:
-            raise ValueError("registered package bundle lacks an artifact URI")
-        verified = self.client.verify_artifact(uri)
-        if verified["artifact"]["sha256"] != bundle["sha256"]:
-            raise ValueError("registered package bundle identity mismatch")
-        archive = root.with_suffix(".tar")
-        materialized = self.client.materialize_artifact(uri, archive)
-        archive_path = Path(str(materialized["path"]))
-        root.mkdir(parents=True, exist_ok=False)
-        _extract_package_tar(archive_path, root)
-        return StrategyPackage.from_record(record, root=root)
-
     def _materialize_workspace_artifact(self, uri: str, destination: Path) -> Path:
         self.client.verify_artifact(uri)
         value = self.client.materialize_artifact(uri, destination)
@@ -170,6 +191,7 @@ class RuntimeExecutor:
         self,
         run: dict[str, Any],
         *,
+        request: dict[str, Any],
         package: StrategyPackage,
         parameters: dict[str, Any],
         snapshot: ResolvedSnapshot,
@@ -194,7 +216,7 @@ class RuntimeExecutor:
             if plan.discovery_adapter is not None
             else None
         )
-        return {
+        identity = {
             "schema": "quant-runtime.identity.v2",
             "request_id": run["run_id"],
             "request_hash": run["request_hash"],
@@ -212,6 +234,26 @@ class RuntimeExecutor:
                 "adapter_version": self.data_adapter.adapter_version,
             },
         }
+        if request.get("schema") == "quant-research.workspace-run-request.v4":
+            profile = _object(request, "sandbox_profile")
+            conformance = _object(request, "behavioral_conformance")
+            identity.update(
+                {
+                    "schema": "quant-runtime.identity.v3",
+                    "sandbox_profile": profile,
+                    "sandbox_profile_hash": sha256_value(profile),
+                    "behavioral_conformance": conformance,
+                    "requested_phases": [
+                        *(["discovery"] if plan.discovery_adapter is not None else []),
+                        *(f"formal.{item.formal_id}" for item in plan.formal),
+                    ],
+                    "backend_implementation": _object(profile, "containment").get(
+                        "implementation", "unspecified"
+                    ),
+                    "dependency_environment": _object(profile, "dependency_environment"),
+                }
+            )
+        return identity
 
     def _run_plan(
         self,
@@ -226,37 +268,100 @@ class RuntimeExecutor:
         storage: AdapterStorage,
         request_hash: str,
         identity: dict[str, Any],
+        package_record: dict[str, Any],
+        request: dict[str, Any],
     ) -> tuple[dict[str, Any], tuple[dict[str, Any], ...]]:
         output.mkdir(parents=True, exist_ok=True)
         discovery_result = None
+        discovery_outcome = None
+        sandbox_outcomes: dict[str, dict[str, Any]] = {}
+        sandboxed = request.get("schema") == "quant-research.workspace-run-request.v4"
+        profile = _object(request, "sandbox_profile") if sandboxed else None
+        try:
+            policy = (
+                self.sandbox_policy_registry.resolve(package_record, profile or {})
+                if sandboxed
+                else None
+            )
+        except SandboxPolicyError:
+            raise SandboxAttemptFailure(_policy_rejection_outcome(profile or {})) from None
         if plan.discovery_adapter is not None:
-            adapter = self.registry.create("discovery", plan.discovery_adapter)
-            discovery_result = adapter.run(
-                DiscoveryRunInput(
+            if sandboxed and policy is not None and policy.execution_mode == "isolated":
+                discovery_result, discovery_outcome = self._run_sandbox_discovery(
+                    package_record=package_record,
                     package=package,
+                    profile=_object(request, "sandbox_profile"),
                     parameters=parameters,
                     snapshot=snapshot,
                     output=output / "discovery" / plan.discovery_adapter,
                     config=plan.discovery_config,
                 )
-            )
+                sandbox_outcomes["discovery"] = discovery_outcome
+            else:
+                adapter = self.registry.create("discovery", plan.discovery_adapter)
+                discovery_result = adapter.run(
+                    DiscoveryRunInput(
+                        package=package,
+                        parameters=parameters,
+                        snapshot=snapshot,
+                        output=output / "discovery" / plan.discovery_adapter,
+                        config=plan.discovery_config,
+                    )
+                )
 
-        formal_results = tuple(
-            self._run_formal(
-                request_id,
-                execution=item,
-                package=package,
-                parameters=parameters,
-                snapshot=snapshot,
-                output=output / "formal" / item.formal_id,
-                storage=storage,
-            )
-            for item in plan.formal
+        strategy_rejected = (
+            discovery_outcome is not None
+            and discovery_outcome["classification"] == "strategy_rejection"
         )
-        comparison = compare_results(plan.topology, formal_results, agreement=plan.agreement)
-        rejected = comparison is not None and comparison.get("status") == "rejected"
+
+        formal_results: tuple[FormalAdapterResult, ...] = ()
+        formal_rejected = False
+        if not strategy_rejected:
+            collected: list[FormalAdapterResult] = []
+            for item in plan.formal:
+                if sandboxed and policy is not None and policy.execution_mode == "isolated":
+                    formal_result, formal_outcome = self._run_sandbox_formal(
+                        package_record=package_record,
+                        package=package,
+                        profile=_object(request, "sandbox_profile"),
+                        parameters=parameters,
+                        snapshot=snapshot,
+                        output=output / "formal" / item.formal_id,
+                        execution=item,
+                    )
+                    sandbox_outcomes[f"formal.{item.formal_id}"] = formal_outcome
+                    if formal_outcome["classification"] == "strategy_rejection":
+                        formal_rejected = True
+                        break
+                    if formal_result is not None:
+                        collected.append(formal_result)
+                else:
+                    collected.append(
+                        self._run_formal(
+                            request_id,
+                            execution=item,
+                            package=package,
+                            parameters=parameters,
+                            snapshot=snapshot,
+                            output=output / "formal" / item.formal_id,
+                            storage=storage,
+                        )
+                    )
+            formal_results = tuple(collected)
+        comparison = (
+            None
+            if strategy_rejected or formal_rejected
+            else compare_results(plan.topology, formal_results, agreement=plan.agreement)
+        )
+        rejected = (
+            strategy_rejected
+            or formal_rejected
+            or (comparison is not None and comparison.get("status") == "rejected")
+        )
         result: dict[str, Any] = {
-            "schema": "quant-research.result.v2",
+            "schema": "quant-research.result.v4"
+            if sandbox_outcomes
+            else "quant-research.result.v2",
             "outcome": "rejected" if rejected else "completed",
             "summary": {
                 "request_id": request_id,
@@ -276,10 +381,21 @@ class RuntimeExecutor:
                 "adapter": discovery_result.backend_id,
                 "metrics": discovery_result.metrics,
             }
+        if sandbox_outcomes:
+            result["sandbox"] = next(reversed(sandbox_outcomes.values()))
+            result["sandbox_phases"] = sandbox_outcomes
         if comparison is not None:
             result["comparison"] = comparison
         if rejected:
-            result["reason"] = "agreement gate rejected the formal executions"
+            result["reason"] = (
+                "strategy rejected Qlib discovery"
+                if strategy_rejected
+                else (
+                    "strategy rejected Nautilus formal execution"
+                    if formal_rejected
+                    else "agreement gate rejected the formal executions"
+                )
+            )
 
         _write_native_evidence_indexes(output)
         manifest = {
@@ -297,6 +413,187 @@ class RuntimeExecutor:
             _artifact_spec(path, output) for path in sorted(output.rglob("*")) if path.is_file()
         )
         return result, specs
+
+    def _run_sandbox_discovery(
+        self,
+        *,
+        package_record: dict[str, Any],
+        package: StrategyPackage,
+        profile: dict[str, Any],
+        parameters: dict[str, Any],
+        snapshot: ResolvedSnapshot,
+        output: Path,
+        config: dict[str, Any],
+    ) -> tuple[DiscoveryAdapterResult | None, dict[str, Any]]:
+        capsule = build_discovery_capsule(snapshot)
+        publication = self.client.publish_record(
+            {
+                "record_id": "sandbox-input."
+                + sha256_value(
+                    {
+                        "capsule_id": capsule["capsule_id"],
+                        "parameters_hash": sha256_value(parameters),
+                    }
+                ),
+                "record_type": "quant-runtime.sandbox-input.v1",
+                "created_at": snapshot.manifest["resolved_at"],
+                "payload": {
+                    "schema": "quant-runtime.sandbox-input.v1",
+                    "snapshot_id": snapshot.snapshot_id,
+                    "capsule_id": capsule["capsule_id"],
+                    "parameters_hash": sha256_value(parameters),
+                },
+            },
+            artifacts=(
+                {
+                    "source": capsule_bytes(capsule),
+                    "media_type": "application/json",
+                    "logical_role": "sandbox-input",
+                    "name": "discovery-capsule.json",
+                },
+                {
+                    "source": canonical_json(parameters),
+                    "media_type": "application/json",
+                    "logical_role": "sandbox-input",
+                    "name": "parameters.json",
+                },
+            ),
+        )
+        inputs = {item["name"]: item for item in publication["artifacts"]}
+        runner = SandboxRunner(
+            self.client,
+            backend=self.sandbox_backend or production_backend(),
+            policy_registry=self.sandbox_policy_registry,
+        )
+        value = runner.invoke(
+            package_record=package_record,
+            profile=profile,
+            phase="discovery",
+            parameters=parameters,
+            input_artifacts=inputs,
+            phase_config={
+                "adapter": "qlib",
+                "config": config,
+                "entrypoint": package.resolve_entrypoint("discovery", "qlib"),
+                "snapshot_id": snapshot.snapshot_id,
+            },
+            output_destination=output,
+        )
+        outcome = _object(value, "sandbox")
+        if value["classification"] == "strategy_rejection":
+            return None, outcome
+        if value["classification"] != "success":
+            raise SandboxAttemptFailure(outcome)
+        payload = _object(value, "payload")
+        metrics = _object(payload, "metrics")
+        return (
+            DiscoveryAdapterResult(
+                backend_id=str(payload["backend_id"]),
+                adapter_version=str(payload["adapter_version"]),
+                engine_version=str(payload["engine_version"]),
+                artifact_hash=str(payload["artifact_hash"]),
+                metrics=metrics,
+                evidence=tuple(payload.get("evidence", ())),
+            ),
+            outcome,
+        )
+
+    def _run_sandbox_formal(
+        self,
+        *,
+        package_record: dict[str, Any],
+        package: StrategyPackage,
+        profile: dict[str, Any],
+        parameters: dict[str, Any],
+        snapshot: ResolvedSnapshot,
+        output: Path,
+        execution: FormalExecution,
+    ) -> tuple[FormalAdapterResult | None, dict[str, Any]]:
+        if execution.adapter != "nautilus":
+            raise ValueError("sandbox formal execution requires the registered Nautilus adapter")
+        capsule = build_snapshot_capsule(snapshot)
+        publication = self.client.publish_record(
+            {
+                "record_id": "sandbox-input."
+                + sha256_value(
+                    {
+                        "phase": "formal",
+                        "formal_id": execution.formal_id,
+                        "capsule_id": capsule["capsule_id"],
+                        "parameters_hash": sha256_value(parameters),
+                        "config_hash": sha256_value(execution.config),
+                    }
+                ),
+                "record_type": "quant-runtime.sandbox-input.v1",
+                "created_at": snapshot.manifest["resolved_at"],
+                "payload": {
+                    "schema": "quant-runtime.sandbox-input.v1",
+                    "phase": "formal",
+                    "formal_id": execution.formal_id,
+                    "snapshot_id": snapshot.snapshot_id,
+                    "capsule_id": capsule["capsule_id"],
+                    "parameters_hash": sha256_value(parameters),
+                },
+            },
+            artifacts=(
+                {
+                    "source": snapshot_capsule_bytes(capsule),
+                    "media_type": "application/json",
+                    "logical_role": "sandbox-input",
+                    "name": "snapshot-capsule.json",
+                },
+                {
+                    "source": canonical_json(parameters),
+                    "media_type": "application/json",
+                    "logical_role": "sandbox-input",
+                    "name": "parameters.json",
+                },
+            ),
+        )
+        inputs = {item["name"]: item for item in publication["artifacts"]}
+        semantics = _read_semantics(execution)
+        runner = SandboxRunner(
+            self.client,
+            backend=self.sandbox_backend or production_backend(),
+            policy_registry=self.sandbox_policy_registry,
+        )
+        value = runner.invoke(
+            package_record=package_record,
+            profile=profile,
+            phase="formal",
+            parameters=parameters,
+            input_artifacts=inputs,
+            phase_config={
+                "adapter": "nautilus",
+                "formal_id": execution.formal_id,
+                "config": execution.config,
+                "entrypoint": package.resolve_entrypoint("formal", "nautilus"),
+                "snapshot_id": snapshot.snapshot_id,
+                "cache_policy": semantics["local_cache"],
+            },
+            output_destination=output,
+        )
+        outcome = _object(value, "sandbox")
+        if value["classification"] == "strategy_rejection":
+            return None, outcome
+        if value["classification"] != "success":
+            raise SandboxAttemptFailure(outcome)
+        payload = _object(value, "payload")
+        return (
+            FormalAdapterResult(
+                formal_id=str(payload["formal_id"]),
+                backend_id=str(payload["backend_id"]),
+                adapter_version=str(payload["adapter_version"]),
+                engine_version=str(payload["engine_version"]),
+                status=str(payload["status"]),
+                metrics=_object(payload, "metrics"),
+                positions=tuple(payload.get("positions", ())),
+                fills=tuple(payload.get("fills", ())),
+                account_curve=tuple(payload.get("account_curve", ())),
+                native_evidence=tuple(payload.get("native_evidence", ())),
+            ),
+            outcome,
+        )
 
     def _run_formal(
         self,
@@ -341,6 +638,37 @@ def _object(value: Mapping[str, Any], name: str) -> dict[str, Any]:
     return dict(item)
 
 
+def _policy_rejection_outcome(profile: Mapping[str, Any]) -> dict[str, Any]:
+    limits = profile.get("limits", {})
+    bounded_limits = {
+        "stdout_bytes": int(limits.get("stdout_bytes", 0)) if isinstance(limits, Mapping) else 0,
+        "stderr_bytes": int(limits.get("stderr_bytes", 0)) if isinstance(limits, Mapping) else 0,
+        "artifacts": int(limits.get("artifacts", 0)) if isinstance(limits, Mapping) else 0,
+    }
+    proof = {
+        "backend_id": "quant-runtime-policy-registry",
+        "mechanism_version": "quant-runtime.sandbox-policy.v1",
+        "proof_id": "sha256:" + sha256_value({"profile": dict(profile), "launched": False}),
+        "candidate_terminated": True,
+        "descendants_terminated": True,
+        "running_processes": 0,
+    }
+    diagnostics = bounded_diagnostics(
+        limits=bounded_limits,
+        stdout_bytes=0,
+        stderr_bytes=0,
+        artifact_count=0,
+        artifact_bytes=0,
+        artifacts_accepted=0,
+        terminal_proof=proof,
+    )
+    return sandbox_outcome(
+        "policy_rejection",
+        diagnostics=diagnostics,
+        payload={"code": "sandbox_policy_rejected", "launched": False},
+    )
+
+
 def _read_semantics(execution: FormalExecution) -> dict[str, Any]:
     raw = execution.config.get("market_data", {})
     if not isinstance(raw, Mapping):
@@ -356,20 +684,6 @@ def _read_semantics(execution: FormalExecution) -> dict[str, Any]:
         "local_cache": local_cache,
         "method": "non_authoritative_cache" if local_cache != "none" else "snapshot_native",
     }
-
-
-def _extract_package_tar(archive: Path, destination: Path) -> None:
-    with tarfile.open(archive, mode="r:") as package:
-        members = package.getmembers()
-        for member in members:
-            relative = PurePosixPath(member.name)
-            if relative.is_absolute() or ".." in relative.parts:
-                raise ValueError(f"strategy package archive path escapes root: {member.name!r}")
-            if not member.isfile() and not member.isdir():
-                raise ValueError(
-                    f"strategy package archive contains a special entry: {member.name!r}"
-                )
-        package.extractall(destination, members=members, filter="data")
 
 
 def _artifact_spec(path: Path, root: Path) -> dict[str, Any]:

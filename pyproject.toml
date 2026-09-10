@@ -4,18 +4,20 @@ build-backend = "hatchling.build"
 
 [project]
 name = "quant-runtime"
-version = "0.2.3"
+version = "0.2.7"
 description = "Qlib and Nautilus execution plane for Strategy Workspace"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "httpx==0.28.1",
+  "joblib==1.5.3",
   "nautilus_trader==1.231.0",
   "pandas==2.3.3",
   "psutil==7.0.0",
   "pyarrow==25.0.1",
   "pyqlib==0.9.7",
-  "strategy-workspace>=0.1.0,<0.2.0",
+  "scikit-learn==1.9.0",
+  "strategy-workspace>=0.1.0,<0.3",
 ]
 
 [project.optional-dependencies]
@@ -32,11 +34,14 @@ quant-runtime = "quant_runtime.cli:main"
 packages = ["src/quant_runtime"]
 
 [tool.pytest.ini_options]
-addopts = "-ra"
+addopts = '-ra -m "not slow and not oci and not connected and not release"'
 testpaths = ["tests"]
 markers = [
   "connected: requires the live yosef-server MarketHub endpoint",
   "engine: requires the pinned NautilusTrader runtime",
+  "oci: requires the pinned Docker Engine Linux OCI backend",
+  "release: runs only at a release-train gate",
+  "slow: exceeds the ordinary 2-second case or 60-second file budget",
 ]
 
 [tool.uv.sources]
