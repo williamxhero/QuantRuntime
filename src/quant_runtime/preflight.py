@@ -400,8 +400,14 @@ def _draft(value: Mapping[str, Any]) -> dict[str, Any]:
         "parameters",
         "execution",
     }
+    optional_admission = {"genome_admission"}
     sandboxed = {"sandbox_profile", "behavioral_conformance"}
-    if set(draft) not in {frozenset(base), frozenset(base | sandboxed)}:
+    if set(draft) not in {
+        frozenset(base),
+        frozenset(base | sandboxed),
+        frozenset(base | optional_admission),
+        frozenset(base | sandboxed | optional_admission),
+    }:
         raise PreflightRequestError("preflight draft has unsupported or missing fields")
     if draft["schema"] not in {
         "quant-research.runtime-preflight-request.v1",
@@ -441,6 +447,10 @@ def _draft(value: Mapping[str, Any]) -> dict[str, Any]:
         "parameters": dict(draft["parameters"]),
         "execution": dict(draft["execution"]),
     }
+    if "genome_admission" in draft:
+        if not isinstance(draft["genome_admission"], Mapping):
+            raise PreflightRequestError("genome admission must be an object")
+        normalized["genome_admission"] = dict(draft["genome_admission"])
     if draft["schema"] in {
         "quant-research.runtime-preflight-request.v2",
         "quant-research.runtime-preflight-request.v3",

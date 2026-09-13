@@ -191,7 +191,9 @@ def _run(
         client = WorkspaceClient(workspace)
         worker = WorkspaceWorker(workspace)
         validate_frozen_preflight(client, draft, prepared)
-        submitted = client.submit_run(_canonical_run_request(draft, prepared["frozen_snapshot"]))
+        request = _canonical_run_request(draft, prepared["frozen_snapshot"])
+        _admit_formal_genome(client, request)
+        submitted = client.submit_run(request)
         return RuntimeExecutor(client, worker).execute(str(submitted["run_id"]))
     client = WorkspaceClient(workspace)
     worker = WorkspaceWorker(workspace)
@@ -217,7 +219,9 @@ def _run(
     preflight = RuntimePreflight(client).preflight(draft)
     if preflight["status"] != "accepted":
         return _unsubmitted(preflight["observation"])
-    submitted = client.submit_run(_canonical_run_request(draft, preflight["frozen_snapshot"]))
+    request = _canonical_run_request(draft, preflight["frozen_snapshot"])
+    _admit_formal_genome(client, request)
+    submitted = client.submit_run(request)
     return RuntimeExecutor(client, worker).execute(str(submitted["run_id"]))
 
 
@@ -236,9 +240,12 @@ def _canonical_run_request(draft: dict[str, Any], frozen_snapshot: Any) -> dict[
         "quant-research.runtime-preflight-request.v2",
         "quant-research.runtime-preflight-request.v3",
     }
+    admission = draft.get("genome_admission")
     request = {
         "schema": (
-            "quant-research.workspace-run-request.v4"
+            "quant-research.workspace-run-request.v5"
+            if sandboxed and admission is not None
+            else "quant-research.workspace-run-request.v4"
             if sandboxed
             else "quant-research.workspace-run-request.v3"
         ),
@@ -250,7 +257,49 @@ def _canonical_run_request(draft: dict[str, Any], frozen_snapshot: Any) -> dict[
     if sandboxed:
         request["sandbox_profile"] = draft["sandbox_profile"]
         request["behavioral_conformance"] = draft["behavioral_conformance"]
+    if admission is not None:
+        request["genome_admission"] = admission
     return request
+
+
+def _admit_formal_genome(client: WorkspaceClient, request: dict[str, Any]) -> None:
+    admission = request.get("genome_admission")
+    if admission is None:
+        return
+    if request["execution"].get("topology") not in {
+        "formal_only",
+        "discovery_formal",
+        "formal_comparison",
+        "agreement_gate",
+    }:
+        raise ValueError("formal genome admission is unavailable for this execution")
+    binding = admission["validation_binding"]
+    if binding["package_hash"] != request["strategy_package"]["package_hash"]:
+        raise ValueError("genome admission package identity does not match the request")
+    if binding["genome_id"] != admission["genome_id"]:
+        raise ValueError("genome admission binding identity is invalid")
+    response = client.authorize_genome_export(
+        {
+            "schema": "quant-research.workspace-genome-request.v1",
+            "operation": "export-authorization",
+            "mode": "local",
+            "validation_scope": "formal-export",
+            "actor": admission["actor"],
+            "capability": admission["capability"],
+            "purpose": admission["purpose"],
+            "action_key": admission["action_key"],
+            "input": {
+                "genome_id": admission["genome_id"],
+                "target": "formal",
+                "grant_status": "published",
+                "validation_binding": binding,
+            },
+        }
+    )
+    if response.get("ok") is not True or response.get("result", {}).get("authorized") is not True:
+        raise ValueError("formal genome admission was not authorized")
+    if response["result"].get("validation_binding") != binding:
+        raise ValueError("formal genome validation binding does not match the request")
 
 
 def _unsubmitted(observation: dict[str, Any]) -> dict[str, Any]:
