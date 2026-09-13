@@ -146,20 +146,31 @@ def _default_roles() -> tuple[DataRolePolicy, ...]:
 
 
 def _readiness(snapshot: Mapping[str, Any], preflight: Mapping[str, Any]) -> dict[str, object]:
+    source = snapshot.get("source")
+    base_url = source.get("base_url") if isinstance(source, Mapping) else None
+    real_source = (
+        isinstance(base_url, str) and base_url.startswith("http") and "fixture" not in base_url
+    )
     semantics = snapshot.get("data_semantics")
     verification = snapshot.get("verification")
     statuses = []
     if isinstance(semantics, Mapping):
         statuses = [item.get("status") for item in semantics.values() if isinstance(item, Mapping)]
-    complete = bool(verification) and all(status == "verified" for status in statuses)
+    complete = (
+        real_source and bool(verification) and all(status == "verified" for status in statuses)
+    )
     return {
         "status": "ready" if preflight.get("status") == "accepted" and complete else "blocked",
         "preflight_status": preflight.get("status"),
         "snapshot_id": snapshot.get("snapshot_id"),
         "data_semantics": dict(semantics) if isinstance(semantics, Mapping) else {},
-        "reason": "all public semantics verified"
-        if complete
-        else "one or more semantics are not verified",
+        "reason": (
+            "all public semantics verified from a non-fixture source"
+            if complete
+            else "fixture or non-real source cannot establish live data readiness"
+            if not real_source
+            else "one or more semantics are not verified"
+        ),
     }
 
 
@@ -169,6 +180,10 @@ def _gaps(
     method_matrix: Sequence[Mapping[str, Any]],
 ) -> tuple[str, ...]:
     gaps: list[str] = []
+    source = snapshot.get("source")
+    base_url = source.get("base_url") if isinstance(source, Mapping) else None
+    if not isinstance(base_url, str) or not base_url.startswith("http") or "fixture" in base_url:
+        gaps.append("real_market_data_source")
     semantics = snapshot.get("data_semantics")
     if isinstance(semantics, Mapping):
         for name, item in semantics.items():

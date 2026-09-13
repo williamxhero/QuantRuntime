@@ -13,7 +13,11 @@ def _preflight() -> dict:
         "status": "accepted",
         "frozen_snapshot": {
             "snapshot_id": "sha256:" + "a" * 64,
-            "source": {"adapter": "markethub", "data_revision": "global-v1"},
+            "source": {
+                "adapter": "markethub",
+                "base_url": "http://yosef-server:8803",
+                "data_revision": "global-v1",
+            },
             "query": {"instruments": ["SH.600000"], "frequency": "1d"},
             "calendar": "cn-equity-v1",
             "as_of": "2025-02-01T00:00:00Z",
@@ -66,6 +70,18 @@ def test_unverified_semantics_are_blocked_and_recorded_as_a_gap() -> None:
     )
     assert result.readiness["status"] == "blocked"
     assert "data_semantics:point_in_time" in result.gaps
+
+
+def test_fixture_source_cannot_be_reported_as_real_readiness() -> None:
+    value = _preflight()
+    value["frozen_snapshot"]["source"]["base_url"] = "http://fixture"
+    result = A0BaselineBuilder().build(
+        preflight=value,
+        capabilities={"capabilities": ["market.cn.equity"]},
+        method_matrix=[{"method": "preflight", "status": "supported"}],
+    )
+    assert result.readiness["status"] == "blocked"
+    assert "real_market_data_source" in result.gaps
 
 
 def test_baseline_rejects_missing_public_snapshot() -> None:
