@@ -11,6 +11,7 @@ from quant_runtime.adapters.data.markethub import (
     MarketHubDataAdapter,
     SnapshotRequest,
 )
+from quant_runtime.a0_baseline import A0BaselineBuilder
 from quant_runtime.preflight import RuntimePreflight
 
 
@@ -82,6 +83,18 @@ def test_live_preflight_returns_a_frozen_reference_without_submitting_a_run(tmp_
 
     assert result["status"] == "accepted", result
     assert result["frozen_snapshot"]["source"]["data_revision"]
+    baseline = A0BaselineBuilder().build(
+        preflight=result,
+        capabilities={"capabilities": ["market.cn.equity", "run.backtest"]},
+        method_matrix=[
+            {"method": "market-hub-preflight", "status": "supported"},
+            {"method": "nautilus-formal", "status": "supported"},
+        ],
+    )
+    assert baseline.as_dict()["a0_data_readiness"]["status"] == "ready"
+    assert (
+        baseline.as_dict()["a0_data_manifest"]["source"]["base_url"] == "http://yosef-server:8803"
+    )
     assert workspace.list_runs() == []
     assert workspace.list_records() == []
 
