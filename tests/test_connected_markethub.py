@@ -6,12 +6,12 @@ from pathlib import Path
 import pytest
 from strategy_workspace import WorkspaceClient
 
+from quant_runtime.a0_baseline import A0BaselineBuilder
 from quant_runtime.adapters.data.markethub import (
     AdapterStorage,
     MarketHubDataAdapter,
     SnapshotRequest,
 )
-from quant_runtime.a0_baseline import A0BaselineBuilder
 from quant_runtime.preflight import RuntimePreflight
 
 
@@ -91,7 +91,9 @@ def test_live_preflight_returns_a_frozen_reference_without_submitting_a_run(tmp_
             {"method": "nautilus-formal", "status": "supported"},
         ],
     )
-    assert baseline.as_dict()["a0_data_readiness"]["status"] == "ready"
+    assert baseline.as_dict()["a0_data_readiness"]["status"] == "blocked"
+    assert "data_semantics:point_in_time" in baseline.gaps
+    assert "data_semantics:provider_lineage" in baseline.gaps
     assert (
         baseline.as_dict()["a0_data_manifest"]["source"]["base_url"] == "http://yosef-server:8803"
     )
