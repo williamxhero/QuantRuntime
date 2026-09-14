@@ -57,6 +57,7 @@ def production_registry() -> AdapterRegistry:
                     "order.market",
                     "position.long_short",
                     "portfolio.multi_instrument",
+                    "portfolio.single_position",
                     "replay.deterministic",
                     "run.backtest",
                     "strategy.stateful",
