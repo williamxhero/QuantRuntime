@@ -11,6 +11,10 @@ from test_executor_topologies import registry
 from quant_runtime.adapters.data.markethub import MarketHubClient, MarketHubDataAdapter
 from quant_runtime.executor import RuntimeExecutor
 from quant_runtime.preflight import RuntimePreflight
+from quant_runtime.registry import production_registry
+
+
+A0_PACKAGE = Path(__file__).parents[1].parent / "strategy-workspace" / "strategies" / "equity" / "a0-ema-crossback"
 
 
 def draft(package_ref: dict) -> dict:
@@ -79,6 +83,24 @@ def test_preflight_returns_a_stable_frozen_value_without_workspace_side_effects(
     assert workspace_state(workspace) == before
     assert client.list_runs() == []
     assert client.list_records() == []
+
+
+def test_production_preflight_accepts_a0_single_position_capability(
+    tmp_path: Path, market_fixture: dict
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = WorkspaceClient(workspace)
+    package = client.register_package(A0_PACKAGE)
+
+    result = RuntimePreflight(
+        client,
+        registry=production_registry(),
+        data_adapter=MarketHubDataAdapter(
+            client_factory=lambda _: MarketHubClient(transport=FixtureTransport(market_fixture))
+        ),
+    ).preflight(draft(package["package_ref"]))
+
+    assert result["status"] == "accepted"
 
 
 def test_versioned_preflight_exposes_runtime_owned_sample_observation(
