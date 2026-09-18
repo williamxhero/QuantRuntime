@@ -13,8 +13,11 @@ from quant_runtime.executor import RuntimeExecutor
 from quant_runtime.preflight import RuntimePreflight
 from quant_runtime.registry import production_registry
 
-
-A0_PACKAGE = Path(__file__).parents[1].parent / "strategy-workspace" / "strategies" / "equity" / "a0-ema-crossback"
+A0_PACKAGE = next(
+    parent / "strategy-workspace" / "strategies" / "equity" / "a0-ema-crossback"
+    for parent in Path(__file__).resolve().parents
+    if (parent / "strategy-workspace" / "strategies" / "equity" / "a0-ema-crossback").is_dir()
+)
 
 
 def draft(package_ref: dict) -> dict:
@@ -91,6 +94,23 @@ def test_production_preflight_accepts_a0_single_position_capability(
     workspace = tmp_path / "workspace"
     client = WorkspaceClient(workspace)
     package = client.register_package(A0_PACKAGE)
+    request = draft(package["package_ref"])
+    request["parameters"] = {
+        "variant_id": "V0",
+        "price_field": "close",
+        "adjustment": "none",
+        "timezone": "Asia/Shanghai",
+        "ema_fast_period": 10,
+        "ema_slow_period": 20,
+        "pivot_lookback_bars": 2,
+        "reset_timeout_bars": 20,
+        "non_crash_policy": "explicit_bar_assertion",
+        "volume_contraction": {
+            "enabled": False,
+            "baseline_window_bars": 3,
+            "threshold_ratio": 1.0,
+        },
+    }
 
     result = RuntimePreflight(
         client,
@@ -98,9 +118,28 @@ def test_production_preflight_accepts_a0_single_position_capability(
         data_adapter=MarketHubDataAdapter(
             client_factory=lambda _: MarketHubClient(transport=FixtureTransport(market_fixture))
         ),
-    ).preflight(draft(package["package_ref"]))
+    ).preflight(request)
 
     assert result["status"] == "accepted"
+    submitted = client.submit_run(
+        {
+            "schema": "quant-research.workspace-run-request.v3",
+            "strategy_package": package["package_ref"],
+            "market_snapshot": result["frozen_snapshot"],
+            "parameters": request["parameters"],
+            "execution": request["execution"],
+        }
+    )
+    completed = RuntimeExecutor(
+        client,
+        WorkspaceWorker(workspace),
+        registry=production_registry(),
+        data_adapter=MarketHubDataAdapter(
+            client_factory=lambda _: MarketHubClient(transport=FixtureTransport(market_fixture))
+        ),
+    ).execute(submitted["run_id"])
+
+    assert completed["status"] == "completed", completed
 
 
 def test_versioned_preflight_exposes_runtime_owned_sample_observation(
