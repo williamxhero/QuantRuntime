@@ -13,6 +13,7 @@ from quant_runtime.artifacts import sha256_value
 from quant_runtime.benchmark import BenchmarkExecutionService
 from quant_runtime.candidate_discovery import CandidateDiscoveryService
 from quant_runtime.conformance import RuntimeConformance
+from quant_runtime.execution_capabilities import run_execution_preflight
 from quant_runtime.executor import RuntimeExecutor
 from quant_runtime.preflight import (
     RuntimePreflight,
@@ -51,6 +52,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     preflight.add_argument("--workspace", type=Path, default=DEFAULT_WORKSPACE)
     preflight.add_argument("--request", type=Path, required=True)
+
+    execution_preflight = commands.add_parser(
+        "execution-preflight",
+        help="observe live execution capabilities for one declared market and date range",
+    )
+    execution_preflight.add_argument("--request", type=Path, required=True)
 
     conformance = commands.add_parser(
         "conformance", help="observe a registered package against frozen synthetic fixtures"
@@ -97,6 +104,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif arguments.command == "preflight":
             payload = _preflight(arguments.workspace, arguments.request)
             exit_code = 0 if payload["status"] == "accepted" else 1
+        elif arguments.command == "execution-preflight":
+            payload = run_execution_preflight(read_transport_json(arguments.request))
+            exit_code = 0 if payload["status"] == "evaluated" else 1
         elif arguments.command == "conformance":
             payload = _conformance(arguments.workspace, arguments.request)
             exit_code = 0 if payload["status"] == "accepted" else 1
