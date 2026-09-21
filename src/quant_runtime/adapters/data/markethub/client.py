@@ -1203,7 +1203,9 @@ class MarketHubClient:
             meta = response.get("meta")
             if not isinstance(page, list) or not isinstance(meta, dict):
                 raise MarketHubContractError("daily-window response shape is invalid")
-            self._validate_daily_meta(meta, page, frozen)
+            self._validate_daily_meta(
+                meta, page, frozen, final_answer=meta.get("next_cursor") is None
+            )
             reported_total = int(meta["total_rows"])
             if total_rows is None:
                 total_rows = reported_total
@@ -1255,6 +1257,8 @@ class MarketHubClient:
         meta: dict[str, Any],
         page: list[Any],
         frozen: HealthVector,
+        *,
+        final_answer: bool,
     ) -> None:
         if str(meta.get("data_version", "")) != frozen.data_version:
             raise MarketHubContractError("daily-window data_version mismatch")
@@ -1264,9 +1268,17 @@ class MarketHubClient:
             raise MarketHubContractError("daily-window universe mismatch")
         if meta.get("truncated") is not False:
             raise MarketHubContractError("daily-window response is truncated")
-        for flag in ("complete", "page_complete", "request_complete", "delivery_complete"):
+        for flag in ("complete", "page_complete", "request_complete"):
             if meta.get(flag) is not True:
                 raise MarketHubContractError(f"daily-window {flag} is not true")
+        # `delivery_complete` reports the state of the whole delivery, not of one answer, so
+        # MarketHub returns false on every answer that still carries a cursor. Require it on the
+        # final answer only, and keep it a declared boolean on every answer.
+        delivery_complete = meta.get("delivery_complete")
+        if not isinstance(delivery_complete, bool):
+            raise MarketHubContractError("daily-window delivery_complete is missing")
+        if final_answer and delivery_complete is not True:
+            raise MarketHubContractError("daily-window delivery_complete is not true")
         if int(meta.get("returned_rows", -1)) != len(page):
             raise MarketHubContractError("daily-window returned_rows mismatch")
         coverage = meta.get("coverage")
