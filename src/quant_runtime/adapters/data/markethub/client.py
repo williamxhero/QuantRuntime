@@ -1264,7 +1264,11 @@ class MarketHubClient:
             raise MarketHubContractError("daily-window universe mismatch")
         if meta.get("truncated") is not False:
             raise MarketHubContractError("daily-window response is truncated")
-        for flag in ("complete", "page_complete", "request_complete", "delivery_complete"):
+        # delivery_complete describes the whole delivery, so MarketHub reports it false on every
+        # page except the last (the one without next_cursor).
+        page_flags = ("complete", "page_complete", "request_complete")
+        final_flags = (*page_flags, "delivery_complete")
+        for flag in page_flags if meta.get("next_cursor") is not None else final_flags:
             if meta.get(flag) is not True:
                 raise MarketHubContractError(f"daily-window {flag} is not true")
         if int(meta.get("returned_rows", -1)) != len(page):

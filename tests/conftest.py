@@ -75,7 +75,7 @@ def market_fixture() -> dict[str, Any]:
             "complete": True,
             "page_complete": True,
             "request_complete": True,
-            "delivery_complete": True,
+            "delivery_complete": cursor is None,
             "returned_rows": size,
             "total_rows": len(items),
             "next_cursor": cursor,

@@ -72,6 +72,34 @@ def test_reference_rejects_ordering_duplicates_and_incomplete_delivery(
             )
 
 
+def fetch_fixture_daily(fixture: dict) -> tuple:
+    return MarketHubClient(transport=FixtureTransport(fixture)).fetch_dataset(
+        ("SH.600000", "SZ.000001"), date(2025, 1, 1), date(2025, 1, 31), page_size=4
+    )
+
+
+def test_multi_page_daily_fetch_requires_delivery_complete_only_on_final_page(
+    market_fixture: dict,
+) -> None:
+    first, last = (page["meta"] for page in market_fixture["daily_pages"])
+    assert first["next_cursor"] and first["delivery_complete"] is False
+    assert last["next_cursor"] is None and last["delivery_complete"] is True
+    fetch_fixture_daily(market_fixture)
+
+    broken = deepcopy(market_fixture)
+    broken["daily_pages"][1]["meta"]["delivery_complete"] = False
+    with pytest.raises(MarketHubContractError, match="delivery_complete is not true"):
+        fetch_fixture_daily(broken)
+
+
+def test_non_final_daily_page_still_requires_page_level_flags(market_fixture: dict) -> None:
+    for flag in ("complete", "page_complete", "request_complete"):
+        broken = deepcopy(market_fixture)
+        broken["daily_pages"][0]["meta"][flag] = False
+        with pytest.raises(MarketHubContractError, match=f"{flag} is not true"):
+            fetch_fixture_daily(broken)
+
+
 def test_materialized_snapshot_consumes_only_workspace_artifact_refs(tmp_path: Path) -> None:
     workspace = WorkspaceClient(tmp_path / "workspace")
     instrument = CanonicalInstrument(
