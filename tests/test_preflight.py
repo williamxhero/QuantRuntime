@@ -104,7 +104,7 @@ def test_production_preflight_accepts_a0_single_position_capability(
         "ema_slow_period": 20,
         "pivot_lookback_bars": 2,
         "reset_timeout_bars": 20,
-        "non_crash_policy": "explicit_bar_assertion",
+        "non_crash_policy": "computed_from_previous_close",
         "volume_contraction": {
             "enabled": False,
             "baseline_window_bars": 3,
