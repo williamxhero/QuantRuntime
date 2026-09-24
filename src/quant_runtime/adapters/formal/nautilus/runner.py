@@ -20,7 +20,7 @@ from quant_runtime.adapters.data.markethub.model import CanonicalDataset
 from quant_runtime.artifacts import sha256_value, write_json
 
 from .china_market_rules import AShareFeeModel, AShareRuleBook, FeeSpec
-from .decisions import decision_envelope, decision_hash
+from .decisions import FormalDecisionRecord, decision_envelope, decision_hash
 from .instruments import VENUE, native_instrument
 from .native_reports import (
     FormalOutput,
@@ -149,7 +149,13 @@ def run_engine(
         run_started = perf_counter()
         engine.run()
         run_seconds = perf_counter() - run_started
-        envelope = decision_envelope(strategy.runtime_decisions, config.strategy.identity_hash)
+        envelope = decision_envelope(
+            strategy.runtime_decisions,
+            config.strategy.identity_hash,
+            generic=any(
+                isinstance(item, FormalDecisionRecord) for item in strategy.runtime_decisions
+            ),
+        )
         formal_decision_hash = decision_hash(envelope)
         write_json(output / "strategy_decisions.json", envelope)
         result = engine.get_result()
