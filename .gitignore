@@ -11,3 +11,7 @@ build/
 runtime/
 .runtime/
 .worktrees/
+/tests/
+/tools/
+/docs/
+/artifacts/
