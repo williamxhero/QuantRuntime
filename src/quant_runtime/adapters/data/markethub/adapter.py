@@ -64,6 +64,27 @@ class ResolvedSnapshot:
     def mode(self) -> str:
         return str(self.manifest["mode"])
 
+    @property
+    def adjustment(self) -> str:
+        """Which price series this snapshot serves.
+
+        The frozen query carries the identity, and it is corroborated by the
+        verified dataset and pinned in the snapshot revision; a frozen snapshot
+        that declares nothing serves raw prices.
+        """
+
+        query = self.manifest.get("query")
+        declared = query.get("adjustment") if isinstance(query, dict) else None
+        declared_adjustment = str(declared or "none")
+        if isinstance(self.dataset, CanonicalDataset):
+            dataset_adjustment = self.dataset.adjustment
+            if declared is not None and declared_adjustment != dataset_adjustment:
+                raise MarketHubContractError(
+                    "snapshot query adjustment differs from its verified canonical dataset"
+                )
+            return dataset_adjustment
+        return declared_adjustment
+
 
 ClientFactory = Callable[[SnapshotRequest], MarketHubClient]
 ArtifactMaterializer = Callable[[str, Path], Path]

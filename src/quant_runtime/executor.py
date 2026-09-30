@@ -130,6 +130,7 @@ class RuntimeExecutor:
                     storage,
                     materialize_artifact=self._materialize_workspace_artifact,
                 )
+                package.require_signal_series(snapshot.adjustment)
                 identity = self._identity(
                     run,
                     request=request,
