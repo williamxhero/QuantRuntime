@@ -47,6 +47,19 @@ class MarketHubRetryExhausted(MarketHubContractError):
     """A retryable MarketHub request exhausted its fixed retry budget."""
 
 
+class MarketHubAdjFactorIncomplete(MarketHubContractError):
+    """A back-adjusted read was refused because factors are missing.
+
+    MarketHub answers the explicit factor opt-in with a deterministic
+    ``ADJ_FACTOR_INCOMPLETE`` refusal, so this is never retried and never falls back
+    to raw prices or a zero-filled factor.
+    """
+
+    def __init__(self, message: str = "", *, missing_codes: tuple[str, ...] = ()) -> None:
+        super().__init__(message or "MarketHub reported incomplete adjustment factors")
+        self.missing_codes = missing_codes
+
+
 @dataclass(slots=True)
 class FetchMetrics:
     request_count: int = 0
@@ -172,7 +185,11 @@ class MarketHubClient:
         end_date: date,
         *,
         page_size: int = 50_000,
+        adjustment: str = "none",
     ) -> CanonicalDataset:
+        if adjustment not in {"none", "hfq"}:
+            raise MarketHubContractError(f"unsupported daily adjustment {adjustment!r}")
+        include_adj_factor = adjustment == "hfq"
         frozen = self._health or self.open()
         catalog = self.fetch_catalog()
         requested = set(instruments)
@@ -186,12 +203,24 @@ class MarketHubClient:
             start_date=start_date,
             end_date=end_date,
             page_size=page_size,
+            include_adj_factor=include_adj_factor,
         )
+        # A read of a sub-universe is answered with rows for the whole universe, so
+        # rows outside this request are ignored rather than treated as malformed. A
+        # requested instrument that really has no rows is still refused below.
         by_code = {item.raw_code: item for item in selected}
+        scoped = tuple(row for row in rows if str(row.get("code", "")) in by_code)
+        if include_adj_factor:
+            self._require_complete_adj_factors(scoped)
         try:
             bars = tuple(
                 sorted(
-                    (CanonicalBar.from_markethub(row, by_code) for row in rows),
+                    (
+                        CanonicalBar.from_markethub(
+                            row, by_code, require_adj_factor=include_adj_factor
+                        )
+                        for row in scoped
+                    ),
                     key=lambda item: item.identity,
                 )
             )
@@ -214,12 +243,32 @@ class MarketHubClient:
             instruments=selected,
             trading_days=trading_days,
             bars=bars,
+            adjustment=adjustment,
         )
         try:
             dataset.validate()
         except ValueError as exc:
             raise MarketHubContractError(f"canonical dataset validation failed: {exc}") from exc
         return dataset
+
+    @staticmethod
+    def _require_complete_adj_factors(rows: tuple[dict[str, Any], ...]) -> None:
+        """Refuse a back-adjusted read that is missing any factor.
+
+        MarketHub already fails closed, so this is the Runtime's own independent
+        guarantee that a requested factor is never absent, never zero-filled and
+        never replaced by the raw price.
+        """
+
+        missing = sorted(
+            {str(row.get("code", "")) for row in rows if row.get("adj_factor") is None}
+        )
+        if missing:
+            raise MarketHubAdjFactorIncomplete(
+                "daily-window adjustment factors are incomplete; "
+                f"no back-adjusted series is available for {missing}",
+                missing_codes=tuple(missing),
+            )
 
     def fetch_futures_dataset(
         self,
@@ -1175,6 +1224,7 @@ class MarketHubClient:
         start_date: date,
         end_date: date,
         page_size: int,
+        include_adj_factor: bool = False,
     ) -> tuple[dict[str, Any], ...]:
         frozen = self._require_open()
         cursor: str | None = None
@@ -1194,6 +1244,8 @@ class MarketHubClient:
                 "page_size": page_size,
                 "meta_detail": "full",
             }
+            if include_adj_factor:
+                body["include_adj_factor"] = True
             if cursor is not None:
                 body["cursor"] = cursor
             response = self._request("POST", "/api/stocks/quotes/daily-window/query", body=body)
@@ -1352,12 +1404,46 @@ class MarketHubClient:
 def _is_retryable_transport_error(exc: Exception) -> bool:
     if isinstance(exc, httpx.ConnectError | httpx.ConnectTimeout | httpx.ReadTimeout):
         return True
-    return isinstance(exc, httpx.HTTPStatusError) and 500 <= exc.response.status_code <= 599
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    # A missing-factor refusal is deterministic: retrying cannot make the factor
+    # exist, and it must never be softened into a raw-price fallback.
+    if _adj_factor_refusal(exc) is not None:
+        return False
+    return 500 <= exc.response.status_code <= 599
+
+
+def _adj_factor_refusal(exc: httpx.HTTPStatusError) -> tuple[str, ...] | None:
+    """Return the codes of a MarketHub ``ADJ_FACTOR_INCOMPLETE`` refusal, if any."""
+
+    if exc.response.status_code != 503:
+        return None
+    try:
+        payload = exc.response.json()
+    except Exception:  # noqa: BLE001 - a non-JSON body simply is not this refusal
+        return None
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    if not isinstance(detail, dict) or detail.get("code") != "ADJ_FACTOR_INCOMPLETE":
+        return None
+    codes = detail.get("missing_codes")
+    if not isinstance(codes, list):
+        return ()
+    return tuple(str(code) for code in codes)
 
 
 def _as_contract_error(method: str, path: str, exc: Exception) -> MarketHubContractError:
     if isinstance(exc, MarketHubContractError):
         return exc
+    if isinstance(exc, httpx.HTTPStatusError):
+        missing = _adj_factor_refusal(exc)
+        if missing is not None:
+            detail = ", ".join(missing)
+            return MarketHubAdjFactorIncomplete(
+                f"{method} {path} refused a back-adjusted read: "
+                f"MarketHub reported ADJ_FACTOR_INCOMPLETE ({detail}); "
+                "no raw-price or zero-filled fallback is permitted",
+                missing_codes=missing,
+            )
     detail = ""
     response = getattr(exc, "response", None)
     if response is not None:

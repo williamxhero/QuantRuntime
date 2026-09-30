@@ -6,7 +6,7 @@ from .adapter import (
     SnapshotVerification,
 )
 from .cache import CACHE_TRANSFORM_VERSION, CacheUse, MarketHubCache
-from .client import MarketHubClient, MarketHubContractError
+from .client import MarketHubAdjFactorIncomplete, MarketHubClient, MarketHubContractError
 from .contract import SnapshotRequest
 from .futures_model import (
     CanonicalFuturesBar,
@@ -33,5 +33,6 @@ __all__ = [
     "FuturesContractCatalogIdentity",
     "MarketHubClient",
     "MarketHubContractError",
+    "MarketHubAdjFactorIncomplete",
     "SnapshotRequest",
 ]

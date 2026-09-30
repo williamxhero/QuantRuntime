@@ -4,6 +4,20 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+# The daily-window contract serves raw OHLC plus an optional per-row cumulative
+# factor, which is exactly hfq (raw x factor). It has no frozen base-date factor, so
+# qfq cannot be served and must not silently degrade to raw prices.
+DAILY_ADJUSTMENTS = ("none", "hfq")
+
+
+def validate_adjustment(frequency: str, adjustment: str) -> None:
+    """Refuse an adjustment label this frequency cannot honestly serve."""
+
+    if adjustment == "":
+        raise ValueError("snapshot adjustment must be an explicit label")
+    if frequency == "1d" and adjustment not in DAILY_ADJUSTMENTS:
+        raise ValueError(f"daily snapshots support adjustment 'none' or 'hfq' (got {adjustment!r})")
+
 
 @dataclass(frozen=True, slots=True)
 class PartialFuturesPublication:
@@ -59,6 +73,10 @@ class SnapshotRequest:
     contract_mapping: str | None
     partial_publication: PartialFuturesPublication | None = None
 
+    def __post_init__(self) -> None:
+        # Types not caught elsewhere still cannot produce a mislabelled price series.
+        validate_adjustment(self.frequency, self.adjustment)
+
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> SnapshotRequest:
         query = value.get("query")
@@ -75,7 +93,7 @@ class SnapshotRequest:
             start=date.fromisoformat(str(query.get("start", ""))),
             end=date.fromisoformat(str(query.get("end", ""))),
             frequency=str(query.get("frequency", "1d")),
-            adjustment=str(query.get("adjustment", "none")),
+            adjustment=str(query.get("adjustment") or "none"),
             calendar=str(query.get("calendar", "cn-equity-v1")),
             contract_mapping=(
                 str(query["contract_mapping"]) if query.get("contract_mapping") else None
@@ -98,6 +116,7 @@ class SnapshotRequest:
             raise ValueError("invalid trust_policy")
         if self.local_cache not in {"none", "ephemeral", "persistent"}:
             raise ValueError("invalid local_cache")
+        validate_adjustment(self.frequency, self.adjustment)
         if self.start > self.end or not self.instruments:
             raise ValueError("snapshot query requires instruments and an ordered date range")
         if len(self.instruments) != len(set(self.instruments)):

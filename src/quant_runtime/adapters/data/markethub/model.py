@@ -25,12 +25,15 @@ class CanonicalBar:
     pre_close: Decimal
     is_suspended: bool
     is_st: bool
+    adj_factor: Decimal | None = None
 
     @classmethod
     def from_markethub(
         cls,
         row: dict[str, Any],
         instrument_by_code: dict[str, CanonicalInstrument],
+        *,
+        require_adj_factor: bool = False,
     ) -> CanonicalBar:
         code = str(row.get("code", ""))
         try:
@@ -40,6 +43,14 @@ class CanonicalBar:
         suspended = bool(row.get("is_suspended", False))
         pre_close = _decimal(row.get("pre_close"))
         fallback = pre_close if suspended else None
+        # The factor is attributed only when it was explicitly requested, so an
+        # unadjusted snapshot never carries one and a requested one never zero-fills.
+        adj_factor = None
+        if require_adj_factor:
+            raw_factor = row.get("adj_factor")
+            if raw_factor is None:
+                raise ValueError(f"back-adjusted row lacks an adjustment factor: {code!r}")
+            adj_factor = _decimal(raw_factor)
         result = cls(
             trading_day=date.fromisoformat(str(row["trade_time"])),
             instrument=instrument.instrument,
@@ -52,6 +63,7 @@ class CanonicalBar:
             pre_close=pre_close,
             is_suspended=suspended,
             is_st=bool(row.get("is_st", instrument.is_st)),
+            adj_factor=adj_factor,
         )
         result.validate()
         return result
@@ -72,6 +84,10 @@ class CanonicalBar:
         )
         if any(not value.is_finite() for value in values):
             raise ValueError(f"non-finite daily row: {self.identity}")
+        if self.adj_factor is not None and (
+            not self.adj_factor.is_finite() or self.adj_factor <= 0
+        ):
+            raise ValueError(f"invalid adjustment factor: {self.identity}")
         if self.volume < 0 or self.amount < 0 or self.pre_close <= 0:
             raise ValueError(f"invalid volume, amount, or pre_close: {self.identity}")
         if min(self.open, self.high, self.low, self.close) <= 0:
@@ -82,7 +98,7 @@ class CanonicalBar:
             raise ValueError(f"low above OHLC member: {self.identity}")
 
     def hash_record(self) -> dict[str, Any]:
-        return {
+        result = {
             "amount": normalize_decimal(self.amount),
             "close": normalize_decimal(self.close),
             "high": normalize_decimal(self.high),
@@ -95,6 +111,9 @@ class CanonicalBar:
             "trading_day": self.trading_day.isoformat(),
             "volume": normalize_decimal(self.volume),
         }
+        if self.adj_factor is not None:
+            result["adj_factor"] = normalize_decimal(self.adj_factor)
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +124,7 @@ class CanonicalDataset:
     instruments: tuple[CanonicalInstrument, ...]
     trading_days: tuple[date, ...]
     bars: tuple[CanonicalBar, ...]
+    adjustment: str = "none"
 
     def validate(self) -> None:
         if not self.data_version or not self.dataset_version:
@@ -123,6 +143,21 @@ class CanonicalDataset:
             raise ValueError("bar references an unknown instrument")
         if any(item.trading_day not in trading_days for item in self.bars):
             raise ValueError("bar falls outside the canonical trading calendar")
+        if self.adjustment == "none":
+            if any(item.adj_factor is not None for item in self.bars):
+                raise ValueError("unadjusted dataset carries an adjustment factor")
+        elif self.adjustment == "hfq":
+            if any(item.adj_factor is None for item in self.bars):
+                raise ValueError("back-adjusted dataset is missing an adjustment factor")
+        else:
+            raise ValueError(f"unsupported daily adjustment {self.adjustment!r}")
+
+    @property
+    def reference_revision(self) -> str:
+        revision = f"{self.data_version}:{self.dataset_version}"
+        if self.adjustment != "none":
+            revision += f";adjustment:{self.adjustment}"
+        return revision
 
     @property
     def input_hash(self) -> str:
@@ -135,6 +170,7 @@ class CanonicalDataset:
             "instruments": [item.hash_record() for item in self.instruments],
             "trading_days": [item.isoformat() for item in self.trading_days],
             "bars": [item.hash_record() for item in self.bars],
+            **({"adjustment": self.adjustment} if self.adjustment != "none" else {}),
         }
         return sha256(canonical_json(value)).hexdigest()
 

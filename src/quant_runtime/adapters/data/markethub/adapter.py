@@ -117,6 +117,7 @@ class MarketHubDataAdapter:
                 "preflight requires a verified immutable MarketHub reference snapshot"
             )
         verification = self.read(request)
+
         semantics = {
             "field_availability": {
                 "status": "verified",
@@ -144,11 +145,12 @@ class MarketHubDataAdapter:
                 raise MarketHubContractError(
                     f"required data semantic is not available: {name}={semantics[name]['status']}"
                 )
-        revision = (
-            verification.dataset.reference_revision
-            if isinstance(verification.dataset, CanonicalFuturesDataset)
-            else f"{verification.dataset.data_version}:{verification.dataset.dataset_version}"
-        )
+
+        # The dataset carries its own adjustment identity, so no external version is
+        # consulted: an hfq reference pins the same stock_daily_1d dataset version the
+        # factor is stored in, and the per-row factors enter the canonical input hash.
+        revision = verification.dataset.reference_revision
+
         source = self._source(request, revision)
         identity = {
             **request.identity_payload(),
@@ -252,6 +254,11 @@ class MarketHubDataAdapter:
                 "materialized futures snapshots require a versioned futures partition contract; "
                 "use a frozen MarketHub reference snapshot"
             )
+        if manifest.get("query", {}).get("adjustment", "none") != "none":
+            raise MarketHubContractError(
+                "materialized daily snapshots cannot carry an adjustment identity; "
+                "use a frozen MarketHub reference snapshot for back-adjusted data"
+            )
         local_metadata = {
             name: _materialize_ref(
                 manifest[name],
@@ -306,6 +313,10 @@ class MarketHubDataAdapter:
             if policy != "none":
                 raise ValueError("futures snapshots currently require market_data.local_cache=none")
             return _no_cache(evidence_root, snapshot, consumer)
+        if snapshot.dataset.adjustment != "none" and policy != "none":
+            # The conversion cache file set has no factor column, so a cached
+            # back-adjusted dataset could not reproduce its canonical input hash.
+            raise ValueError("back-adjusted daily snapshots require market_data.local_cache=none")
         return MarketHubCache(layout).prepare(
             policy=policy,
             snapshot_id=snapshot.snapshot_id,
@@ -347,6 +358,7 @@ class MarketHubDataAdapter:
                 request.instruments,
                 request.start,
                 request.end,
+                adjustment=request.adjustment,
             )
         catalog = tuple(item.hash_record() for item in dataset.instruments)
         calendar = (
@@ -377,11 +389,7 @@ class MarketHubDataAdapter:
         )
         if any(not item["complete"] for item in coverage):
             raise MarketHubContractError(f"snapshot coverage is incomplete: {coverage!r}")
-        actual_revision = (
-            dataset.reference_revision
-            if isinstance(dataset, CanonicalFuturesDataset)
-            else f"{dataset.data_version}:{dataset.dataset_version}"
-        )
+        actual_revision = dataset.reference_revision
         if expected_revision is not None and actual_revision != expected_revision:
             raise MarketHubContractError(
                 "MarketHub reference snapshot drifted before read: "
@@ -393,15 +401,12 @@ class MarketHubDataAdapter:
         verification = None
         if request.trust_policy == "verified_immutable":
             verification = self.read(request)
-        revision = (
-            (
-                verification.dataset.reference_revision
-                if isinstance(verification.dataset, CanonicalFuturesDataset)
-                else (f"{verification.dataset.data_version}:{verification.dataset.dataset_version}")
-            )
-            if verification is not None
-            else self._resolve_revision(request)
-        )
+
+        if verification is not None:
+            revision = verification.dataset.reference_revision
+        else:
+            revision = self._resolve_revision(request)
+
         source = self._source(request, revision)
         identity = {
             **request.identity_payload(),
@@ -433,6 +438,9 @@ class MarketHubDataAdapter:
         request: SnapshotRequest,
         revision: str,
     ) -> dict[str, Any]:
+        # The published snapshot `source` object has a frozen five-field shape, so the
+        # adjustment identity travels inside `data_revision` and the query instead of a
+        # sixth key that would fail Workspace schema validation.
         return {
             "adapter": self.name,
             "adapter_version": self.adapter_version,
@@ -472,7 +480,12 @@ class MarketHubDataAdapter:
             raise MarketHubContractError(
                 f"MarketHub health lacks the {request.frequency} dataset version"
             )
-        return f"{health.data_version}:{dataset_version}"
+        # The factor is a column of stock_daily_1d, so that same dataset version pins
+        # it; `adjustment` records which price series the reference actually serves.
+        revision = f"{health.data_version}:{dataset_version}"
+        if request.adjustment != "none":
+            revision += f";adjustment:{request.adjustment}"
+        return revision
 
     def _publish_manifest(
         self,
