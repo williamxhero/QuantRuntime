@@ -15,6 +15,7 @@ from quant_runtime.adapters.data.markethub.contract import validate_snapshot_man
 from quant_runtime.artifacts import sha256_value
 from quant_runtime.capabilities import AdapterRegistry
 from quant_runtime.materialization import VerifiedPackageMaterializer
+from quant_runtime.package import SignalSeriesUnavailable
 from quant_runtime.registry import production_registry
 from quant_runtime.sandbox.policy import SandboxPolicyRegistry
 
@@ -98,6 +99,8 @@ class RuntimePreflight:
             return result
         except PreflightRequestError as exc:
             return _failure("request_invalid", "preflight_request_invalid", str(exc))
+        except SignalSeriesUnavailable as exc:
+            return _failure("request_invalid", "signal_series_unavailable", str(exc))
         except MarketHubContractError as exc:
             message = str(exc)
             if message.startswith("required data semantic"):
@@ -377,6 +380,7 @@ def _validate_local_request(
             package_record,
             Path(temporary) / "package",
         )
+        package.require_signal_series(request.adjustment)
         if package.frequencies and request.frequency not in package.frequencies:
             raise PreflightRequestError(
                 f"strategy package does not support MarketHub frequency {request.frequency!r}"

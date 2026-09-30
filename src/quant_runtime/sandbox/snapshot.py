@@ -42,6 +42,10 @@ def build_snapshot_capsule(snapshot: ResolvedSnapshot) -> dict[str, Any]:
             "trading_days": [item.isoformat() for item in dataset.trading_days],
             "bars": [item.hash_record() for item in dataset.bars],
         }
+        # Preserve the V1.1 capsule identity for raw datasets. Adjusted capsules
+        # need the extra series identity because their bars carry adjustment factors.
+        if dataset.adjustment != "none":
+            identity["adjustment"] = dataset.adjustment
     elif isinstance(dataset, CanonicalFuturesDataset):
         partial = (
             dataset.bars.verification
@@ -92,6 +96,7 @@ def load_snapshot_capsule(path: Path, *, snapshot_id: str) -> ResolvedSnapshot:
                     date.fromisoformat(str(item)) for item in supplied["trading_days"]
                 ),
                 bars=tuple(_bar(item) for item in supplied["bars"]),
+                adjustment=str(supplied.get("adjustment", "none")),
             )
         elif supplied.get("kind") == "futures-1m":
             dataset = _futures_dataset(supplied)
@@ -147,6 +152,7 @@ def _bar(value: Any) -> CanonicalBar:
         pre_close=Decimal(str(value["pre_close"])),
         is_suspended=bool(value["is_suspended"]),
         is_st=bool(value["is_st"]),
+        adj_factor=None if value.get("adj_factor") is None else Decimal(str(value["adj_factor"])),
     )
 
 

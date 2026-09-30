@@ -6,6 +6,15 @@ from typing import Any
 
 from quant_runtime.artifacts import sha256_value
 
+SIGNAL_CAPABILITY = "data.bar.1d"
+SIGNAL_FREQUENCY = "1d"
+SIGNAL_ADJUSTMENTS = frozenset({"none", "hfq"})
+REFUSED_SIGNAL_ADJUSTMENTS = frozenset({"qfq", "offset"})
+
+
+class SignalSeriesUnavailable(RuntimeError):
+    """A declared back-adjusted signal series could not be served honestly."""
+
 
 @dataclass(frozen=True, slots=True)
 class StrategyPackage:
@@ -67,6 +76,56 @@ class StrategyPackage:
         if not isinstance(pipeline, dict):
             raise ValueError("strategy package pipeline must be an object")
         return str(pipeline.get("discovery", "optional"))
+
+    @property
+    def signal_adjustment(self) -> str:
+        """The adjustment the strategy reads signals from: ``none`` or ``hfq``.
+
+        Strategy Workspace owns the declaration shape, so this reads the v2
+        ``requirements.data`` array of ``{capability, frequency, adjustment}``
+        entries.  A package that declares no daily-bar entry -- every V1.1 object --
+        reads raw prices, exactly as before.
+        """
+
+        requirements = self.manifest.get("requirements", {})
+        if not isinstance(requirements, dict):
+            raise ValueError("strategy package requirements must be an object")
+        data = requirements.get("data")
+        if data is None:
+            return "none"
+        if not isinstance(data, list):
+            raise SignalSeriesUnavailable(
+                "strategy package requirements.data must be an array of data declarations"
+            )
+        declared = [
+            item
+            for item in data
+            if isinstance(item, dict)
+            and str(item.get("capability")) == SIGNAL_CAPABILITY
+            and str(item.get("frequency")) == SIGNAL_FREQUENCY
+        ]
+        adjustments = {str(item.get("adjustment")) for item in declared}
+        if refused := sorted(adjustments & REFUSED_SIGNAL_ADJUSTMENTS):
+            raise SignalSeriesUnavailable(
+                f"daily back-adjusted signals support 'hfq' only; declared {refused}"
+            )
+        if unsupported := sorted(adjustments - SIGNAL_ADJUSTMENTS):
+            raise SignalSeriesUnavailable(
+                f"unsupported daily signal adjustment declared: {unsupported}"
+            )
+        return "hfq" if "hfq" in adjustments else "none"
+
+    def require_signal_series(self, snapshot_adjustment: str) -> None:
+        """Refuse a declared signal series the resolved snapshot cannot carry."""
+
+        if self.signal_adjustment != "hfq":
+            return
+        if snapshot_adjustment != "hfq":
+            raise SignalSeriesUnavailable(
+                "strategy package declares a back-adjusted daily signal series "
+                f"('{SIGNAL_CAPABILITY}' adjustment 'hfq') but the snapshot is "
+                f"{snapshot_adjustment!r}; re-run against an hfq snapshot"
+            )
 
     def implementations(self, role: str) -> dict[str, str]:
         implementations = self.manifest.get("implementations", {})

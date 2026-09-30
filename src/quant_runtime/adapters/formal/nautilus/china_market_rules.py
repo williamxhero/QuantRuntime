@@ -11,6 +11,7 @@ from nautilus_trader.model.objects import Money
 
 from quant_runtime.adapters.data.markethub.catalog import CanonicalInstrument
 from quant_runtime.adapters.data.markethub.model import CanonicalBar, CanonicalDataset
+from quant_runtime.package import SignalSeriesUnavailable
 
 CENT = Decimal("0.01")
 
@@ -68,9 +69,46 @@ class AShareFeeModel(FeeModel):
 
 
 class AShareRuleBook:
+    """Execution rules on raw prices, plus the back-adjusted signal series.
+
+    Execution reads only the raw bars.  ``signal_close`` is the one seam that
+    serves the back-adjusted series, and it refuses rather than silently serving
+    raw prices when the dataset cannot honestly carry that series.
+    """
+
     def __init__(self, dataset: CanonicalDataset) -> None:
+        self._adjustment = dataset.adjustment
         self._instruments = {item.instrument: item for item in dataset.instruments}
         self._bars = {item.identity: item for item in dataset.bars}
+
+    @property
+    def adjustment(self) -> str:
+        """The price series this rule book's dataset carries."""
+
+        return self._adjustment
+
+    def signal_close(self, trading_day: date, instrument: str) -> Decimal:
+        """Return the back-adjusted close for one instrument/day.
+
+        ``hfq`` prices are the raw price scaled by the day's adjustment factor, so
+        the series stays continuous across an ex-rights event while execution keeps
+        filling at the raw price carried by the same bar.
+        """
+
+        if self._adjustment != "hfq":
+            raise SignalSeriesUnavailable(
+                f"dataset adjustment is {self._adjustment!r}; no back-adjusted signal series"
+            )
+        bar = self._bars.get((trading_day, instrument))
+        if bar is None:
+            raise SignalSeriesUnavailable(f"no daily bar for {trading_day} {instrument}")
+        if bar.adj_factor is None:
+            raise SignalSeriesUnavailable(
+                f"back-adjusted bar lacks an adjustment factor: {trading_day} {instrument}"
+            )
+        return (bar.close * bar.adj_factor).quantize(
+            self._instruments[instrument].tick_size, rounding=ROUND_HALF_UP
+        )
 
     def state_for(
         self,
