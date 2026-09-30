@@ -752,72 +752,128 @@ def _corporate_actions(
     from quant_runtime.adapters.data.markethub import client as client_module
 
     request_body = inspect.getsource(client_module.MarketHubClient.fetch_daily)
-    carries_adjustment = '"adjustment"' in request_body
+    carries_opt_in = '"include_adj_factor"' in request_body
     payload: dict[str, Any] = {
         "declared_adjustment": value["probe"]["adjustment"],
-        "daily_request_carries_adjustment": carries_adjustment,
+        "daily_request_carries_factor_opt_in": carries_opt_in,
         "live_bar_evidence": _bar_evidence(observed),
     }
     sources: list[dict[str, Any]] = [
         _runtime_source(
             "quant_runtime.adapters.data.markethub.client.MarketHubClient.fetch_daily",
-            "the daily-window request body carries no adjustment argument, so 1d equity "
-            "prices are read exactly as MarketHub stores them",
+            "the daily-window request body carries `include_adj_factor` for a back-adjusted "
+            "read and omits it otherwise, so raw OHLC is unchanged and the factor arrives "
+            "as an extra per-row field",
         ),
         _runtime_source(
             "quant_runtime.adapters.data.markethub.contract.SnapshotRequest",
-            "`adjustment` is validated only for 1m futures; for 1d equities it is carried "
-            "into the snapshot identity and never into a request",
+            "for 1d equities `adjustment` is validated to 'none' or 'hfq' and is carried "
+            "both into the request and into the snapshot identity",
         ),
     ]
-    if observed:
-        probe = observed[0]
-        instruments = probe.instruments[:1]
-        window_end = min(probe.end, date(probe.start.year + 1, probe.start.month, probe.start.day))
-        try:
-            baseline = adapter.read(
-                _snapshot_request(value, instruments, probe.start, window_end, adjustment="none")
+    if not observed:
+        sources.extend(blocked)
+        return FieldObservation(
+            field="corporate_actions",
+            status="not_evaluated",
+            value=payload,
+            sources=tuple(sources),
+            reason=(
+                "no live bar window backed this snapshot, so the Runtime could not read the "
+                "published adjustment factor and cannot evidence any corporate-action status"
+            ),
+        )
+
+    probe = observed[0]
+    instruments = probe.instruments[:1]
+    window_end = min(probe.end, date(probe.start.year + 1, probe.start.month, probe.start.day))
+    try:
+        baseline = adapter.read(
+            _snapshot_request(value, instruments, probe.start, window_end, adjustment="none")
+        )
+        adjusted = adapter.read(
+            _snapshot_request(value, instruments, probe.start, window_end, adjustment="hfq")
+        )
+    except MarketHubContractError as exc:
+        sources.append(
+            _blocked_source(
+                "/api/stocks/quotes/daily-window/query",
+                f"the adjustment comparison failed closed: {exc}",
             )
-            forward = adapter.read(
-                _snapshot_request(value, instruments, probe.start, window_end, adjustment="forward")
-            )
-        except MarketHubContractError as exc:
-            sources.append(
-                _blocked_source(
-                    "/api/stocks/quotes/daily-window/query",
-                    f"the adjustment comparison failed closed: {exc}",
-                )
-            )
-        else:
-            payload["experiment"] = {
-                "instruments": list(instruments),
-                "start": probe.start.isoformat(),
-                "end": window_end.isoformat(),
-                "none_canonical_input_hash": baseline.dataset.input_hash,
-                "forward_canonical_input_hash": forward.dataset.input_hash,
-                "adjustment_changes_canonical_input": (
-                    baseline.dataset.input_hash != forward.dataset.input_hash
-                ),
-            }
-            sources.append(
-                _live_source(
-                    "/api/stocks/quotes/daily-window/query",
-                    "two live reads of the same window under adjustment 'none' and 'forward'",
-                )
-            )
+        )
+        sources.extend(blocked)
+        return FieldObservation(
+            field="corporate_actions",
+            status="not_evaluated",
+            value=payload,
+            sources=tuple(sources),
+            reason=(
+                "the Runtime read neither the raw nor the back-adjusted series with evidence: "
+                f"the live comparison failed closed ({exc}), so no corporate-action status can "
+                "be asserted"
+            ),
+        )
+
+    baseline_bars = {bar.identity: bar for bar in baseline.dataset.bars}
+    adjusted_bars = {bar.identity: bar for bar in adjusted.dataset.bars}
+    raw_unchanged = all(
+        identity in adjusted_bars
+        and adjusted_bars[identity].close == bar.close
+        and adjusted_bars[identity].open == bar.open
+        and adjusted_bars[identity].high == bar.high
+        and adjusted_bars[identity].low == bar.low
+        for identity, bar in baseline_bars.items()
+    )
+    factors_evidenced = bool(adjusted_bars) and all(
+        bar.adj_factor is not None and bar.adj_factor > 0 for bar in adjusted_bars.values()
+    )
+    payload["experiment"] = {
+        "instruments": list(instruments),
+        "start": probe.start.isoformat(),
+        "end": window_end.isoformat(),
+        "none_canonical_input_hash": baseline.dataset.input_hash,
+        "hfq_canonical_input_hash": adjusted.dataset.input_hash,
+        "adjustment_changes_canonical_input": (
+            baseline.dataset.input_hash != adjusted.dataset.input_hash
+        ),
+        "raw_ohlc_unchanged_under_hfq": raw_unchanged,
+        "every_hfq_bar_carries_a_factor": factors_evidenced,
+        "sample_factor": next(
+            (normalize_decimal(item.adj_factor) for item in adjusted_bars.values()), None
+        ),
+    }
+    sources.append(
+        _live_source(
+            "/api/stocks/quotes/daily-window/query",
+            "two live reads of the same window under adjustment 'none' and 'hfq'; the raw "
+            "OHLC is identical and the hfq read adds a per-row factor",
+        )
+    )
     sources.extend(blocked)
+    if not (raw_unchanged and factors_evidenced):
+        return FieldObservation(
+            field="corporate_actions",
+            status="not_evaluated",
+            value=payload,
+            sources=tuple(sources),
+            reason=(
+                "the live comparison did not show raw OHLC unchanged with a factor present on "
+                "every back-adjusted bar, so no corporate-action status can be asserted"
+            ),
+        )
     return FieldObservation(
         field="corporate_actions",
-        status="not_evaluated",
+        status="supported_with_limitation",
         value=payload,
         sources=tuple(sources),
-        reason=(
-            "the Runtime applies no corporate-action adjustment to 1d A-share prices: "
-            "`adjustment` is only a snapshot identity label and the daily-window request "
-            "carries no adjustment argument, so splits, dividends and rights issues are "
-            "neither applied nor reconciled. MarketHub publishes corporate-action and "
-            "adjustment-factor endpoints, but no authorized source documents how a formal "
-            "run should consume them, and no such consumption exists in this Runtime."
+        limitation=(
+            "the Runtime serves the published per-row cumulative adjustment factor and can "
+            "hand a strategy a back-adjusted signal series, but execution, price-limit "
+            "state, lot size and fees continue to use raw prices, and delivering the "
+            "back-adjusted series to formal strategy code is the separate V1.2-S1-T5 "
+            "contract. The factor carries no base date because hfq is cumulative from "
+            "listing (raw x factor); qfq, which would need the frozen base-date factor, is "
+            "refused for daily snapshots rather than silently served as raw"
         ),
     )
 
