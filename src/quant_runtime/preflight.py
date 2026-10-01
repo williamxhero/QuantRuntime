@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,10 +13,11 @@ from quant_runtime.adapters.data.markethub import (
     SnapshotRequest,
 )
 from quant_runtime.adapters.data.markethub.contract import validate_snapshot_manifest
-from quant_runtime.artifacts import sha256_value
+from quant_runtime.artifacts import canonical_json, sha256_bytes, sha256_value
 from quant_runtime.capabilities import AdapterRegistry
+from quant_runtime.conformance import DIMENSIONS
 from quant_runtime.materialization import VerifiedPackageMaterializer
-from quant_runtime.package import SignalSeriesUnavailable
+from quant_runtime.package import SignalSeriesUnavailable, StrategyPackage
 from quant_runtime.registry import production_registry
 from quant_runtime.sandbox.policy import SandboxPolicyRegistry
 
@@ -359,6 +361,21 @@ def _validate_data_observation(value: object, snapshot: Mapping[str, Any]) -> No
         raise PreflightRequestError("Runtime data observation total is invalid")
 
 
+def _requires_price_limit_receipt(package_record: Mapping[str, Any]) -> bool:
+    manifest = package_record.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise PreflightRequestError("registered package manifest is invalid")
+    if manifest.get("schema") != "quant-research.strategy-package.v2":
+        return False
+    requirements = manifest.get("requirements")
+    if not isinstance(requirements, Mapping):
+        raise PreflightRequestError("registered package requirements are invalid")
+    capabilities = requirements.get("capabilities")
+    if not isinstance(capabilities, list):
+        raise PreflightRequestError("registered package capabilities are invalid")
+    return "market.cn.equity.price_limit" in capabilities
+
+
 def _validate_local_request(
     client: WorkspacePreflightClientPort,
     registry: AdapterRegistry,
@@ -367,11 +384,22 @@ def _validate_local_request(
     request: SnapshotRequest,
 ) -> dict[str, Any]:
     package_record = client.get_registered_package(value["strategy_package"])
-    if value["schema"] in {
+    # V1 registrations remain on their historical admission path. New S2 v2
+    # packages cannot bypass conformance by choosing a legacy draft schema.
+    price_limit_receipt = _requires_price_limit_receipt(package_record)
+    sandboxed = value["schema"] in {
         "quant-research.runtime-preflight-request.v2",
         "quant-research.runtime-preflight-request.v3",
-    }:
-        resolved = policy_registry.resolve(package_record, value["sandbox_profile"])
+    }
+    if price_limit_receipt and not sandboxed:
+        raise PreflightRequestError(
+            "price-limit behavioral conformance receipt is required; "
+            "use a sandboxed preflight request with the current receipt"
+        )
+    resolved = (
+        policy_registry.resolve(package_record, value["sandbox_profile"]) if sandboxed else None
+    )
+    if resolved is not None and not price_limit_receipt:
         _verify_conformance(client, package_record, value, resolved.identity_hash)
     _required_semantics(value["snapshot_request"])
     _as_of(value["snapshot_request"])
@@ -380,6 +408,15 @@ def _validate_local_request(
             package_record,
             Path(temporary) / "package",
         )
+        if price_limit_receipt:
+            assert resolved is not None
+            _verify_conformance(
+                client,
+                package_record,
+                value,
+                resolved.identity_hash,
+                scenario_hash=_price_limit_scenario_hash(package),
+            )
         package.require_signal_series(request.adjustment)
         if package.frequencies and request.frequency not in package.frequencies:
             raise PreflightRequestError(
@@ -468,11 +505,56 @@ def _draft(value: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _price_limit_scenario_hash(package: StrategyPackage) -> str:
+    """Read the T4A scenario identity from verified, non-executable package bytes."""
+
+    provenance = package.manifest.get("provenance", {})
+    binding_path = provenance.get("binding_path")
+    if not isinstance(binding_path, str):
+        raise PreflightRequestError("price-limit conformance provenance is missing")
+    path = (package.root / binding_path).resolve()
+    if not path.is_relative_to(package.root.resolve()):
+        raise PreflightRequestError("price-limit conformance provenance path is invalid")
+    try:
+        raw = path.read_bytes()
+        binding = json.loads(raw)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PreflightRequestError("price-limit conformance provenance is malformed") from exc
+    if sha256_bytes(raw) != provenance.get("binding_sha256") or not isinstance(binding, Mapping):
+        raise PreflightRequestError("price-limit conformance provenance identity is invalid")
+    conformance = binding.get("conformance")
+    if (
+        binding.get("schema") != "strategy-workspace.package-provenance-binding.v1"
+        or binding.get("strategy_id") != package.strategy_id
+        or binding.get("revision") != package.revision
+        or binding.get("records") != provenance.get("records")
+        or not isinstance(conformance, Mapping)
+        or conformance.get("scenario_set_id") != "strategy-workspace.price-limit.v1"
+        or conformance.get("entrypoint") != package.implementations("conformance").get("runtime")
+        or not isinstance(conformance.get("entrypoint"), str)
+    ):
+        raise PreflightRequestError("price-limit conformance provenance binding is invalid")
+    digest = conformance.get("scenario_hash")
+    if not _is_sha256(digest):
+        raise PreflightRequestError("price-limit conformance scenario hash is invalid")
+    return str(digest)
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
 def _verify_conformance(
     client: WorkspacePreflightClientPort,
     package_record: Mapping[str, Any],
     draft: Mapping[str, Any],
     profile_hash: str,
+    *,
+    scenario_hash: str | None = None,
 ) -> None:
     reference = dict(draft["behavioral_conformance"])
     required = {
@@ -495,35 +577,120 @@ def _verify_conformance(
         reference.get("status") != "passed"
         or reference.get("evidence_level") != "behavioral-conformance"
     ):
-        raise PreflightRequestError("behavioral conformance did not pass")
+        raise PreflightRequestError("behavioral conformance receipt reports a failed outcome")
+    if (
+        not isinstance(reference.get("conformance_id"), str)
+        or not reference["conformance_id"].startswith("sha256:")
+        or not _is_sha256(reference["conformance_id"][len("sha256:") :])
+        or not all(
+            _is_sha256(reference.get(key))
+            for key in ("package_hash", "parameters_hash", "profile_hash", "scenario_hash")
+        )
+    ):
+        raise PreflightRequestError("behavioral conformance receipt is malformed")
     expected = {
         "package_hash": package_record["package_ref"]["package_hash"],
         "parameters_hash": sha256_value(dict(draft["parameters"])),
         "profile_hash": profile_hash,
     }
-    if any(reference.get(key) != item for key, item in expected.items()):
-        raise PreflightRequestError("behavioral conformance identity does not match the run")
+    if scenario_hash is not None:
+        expected["scenario_hash"] = scenario_hash
+    for key, item in expected.items():
+        if reference.get(key) != item:
+            raise PreflightRequestError(
+                f"behavioral conformance {key.removesuffix('_hash')} hash does not match the run"
+            )
     artifact = reference.get("artifact")
     if not isinstance(artifact, Mapping):
-        raise PreflightRequestError("behavioral conformance artifact is invalid")
-    verification = client.verify_artifact(str(artifact.get("uri", "")))
-    verified = verification.get("artifact", {})
-    if verification.get("verified") is not True or any(
-        verified.get(key) != artifact.get(key) for key in ("uri", "sha256", "bytes")
+        raise PreflightRequestError("behavioral conformance receipt artifact is malformed")
+    artifact_required = {
+        "schema",
+        "uri",
+        "sha256",
+        "bytes",
+        "media_type",
+        "record_schema",
+        "logical_role",
+        "name",
+    }
+    if (
+        set(artifact) != artifact_required
+        or artifact.get("schema") != "quant-research.artifact-ref.v1"
+        or not isinstance(artifact.get("uri"), str)
+        or not _is_sha256(artifact.get("sha256"))
+        or not isinstance(artifact.get("bytes"), int)
+        or isinstance(artifact.get("bytes"), bool)
+        or artifact["bytes"] < 0
+        or artifact.get("record_schema") != "quant-runtime.behavioral-conformance-evidence.v1"
+        or artifact.get("logical_role") != "behavioral-conformance"
     ):
-        raise PreflightRequestError("behavioral conformance artifact verification failed")
-    publication = client.get_record(str(reference["conformance_id"]))
-    evidence = publication.get("payload", {})
-    if publication.get(
-        "record_type"
-    ) != "quant-runtime.behavioral-conformance.v1" or publication.get("artifacts") != [artifact]:
+        raise PreflightRequestError("behavioral conformance receipt artifact is malformed")
+    try:
+        verification = client.verify_artifact(str(artifact["uri"]))
+    except Exception as exc:
         raise PreflightRequestError(
-            "behavioral conformance publication does not match its reference"
-        )
-    if any(evidence.get(key) != reference.get(key) for key in (*expected, "scenario_hash")) or (
-        evidence.get("evidence_level") != "behavioral-conformance"
+            "behavioral conformance receipt artifact is missing or stale"
+        ) from exc
+    verified = verification.get("artifact", {})
+    if verification.get("verified") is not True or verified != artifact:
+        raise PreflightRequestError("behavioral conformance receipt artifact readback mismatch")
+    try:
+        publication = client.get_record(str(reference["conformance_id"]))
+    except Exception as exc:
+        raise PreflightRequestError(
+            "behavioral conformance receipt publication is missing or stale"
+        ) from exc
+    if not isinstance(publication, Mapping):
+        raise PreflightRequestError("behavioral conformance receipt publication is malformed")
+    if (
+        publication.get("record_id") != reference["conformance_id"]
+        or publication.get("record_type") != "quant-runtime.behavioral-conformance.v1"
+        or publication.get("artifacts") != [artifact]
     ):
-        raise PreflightRequestError("behavioral conformance evidence identity is invalid")
+        raise PreflightRequestError(
+            "behavioral conformance receipt publication does not match its reference"
+        )
+    evidence = publication.get("payload")
+    if not isinstance(evidence, Mapping):
+        raise PreflightRequestError("behavioral conformance receipt evidence is malformed")
+    if scenario_hash is not None:
+        payload = canonical_json(dict(evidence))
+        digest = sha256_bytes(payload)
+        if (
+            reference["conformance_id"] != "sha256:" + digest
+            or artifact["sha256"] != digest
+            or artifact["bytes"] != len(payload)
+        ):
+            raise PreflightRequestError(
+                "behavioral conformance receipt canonical evidence identity is invalid"
+            )
+    if (
+        evidence.get("schema") != "quant-runtime.behavioral-conformance-evidence.v1"
+        or evidence.get("evidence_level") != "behavioral-conformance"
+        or evidence.get("outcome")
+        not in ({"passed"} if scenario_hash is not None else {None, "passed"})
+        or any(evidence.get(key) != reference.get(key) for key in (*expected, "scenario_hash"))
+    ):
+        raise PreflightRequestError("behavioral conformance receipt evidence identity is invalid")
+    dimensions = evidence.get("dimensions")
+    trace = evidence.get("trace")
+    if (
+        not isinstance(dimensions, Mapping)
+        or set(dimensions) != DIMENSIONS
+        or any(
+            not isinstance(item, Mapping) or item.get("status") != "passed"
+            for item in dimensions.values()
+        )
+        or not isinstance(trace, list)
+        or (scenario_hash is not None and not trace)
+        or (
+            scenario_hash is not None
+            and any(
+                not isinstance(item, Mapping) or item.get("status") != "passed" for item in trace
+            )
+        )
+    ):
+        raise PreflightRequestError("behavioral conformance receipt reports a failed outcome")
 
 
 def _snapshot_request(value: Mapping[str, Any]) -> dict[str, Any]:
