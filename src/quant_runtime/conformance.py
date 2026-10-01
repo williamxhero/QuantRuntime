@@ -53,6 +53,7 @@ class RuntimeConformance:
         try:
             value = _request(request)
             package_record = self._client.get_registered_package(value["strategy_package"])
+            binding = _binding_identity(value, package_record)
             scenarios = {
                 f"scenario-{index:04d}.json": artifact
                 for index, artifact in enumerate(value["behavioral_scenarios"])
@@ -79,10 +80,19 @@ class RuntimeConformance:
                 phase_config=phase_config,
             )
             if outcome["classification"] != "success":
-                return _rejected(outcome["classification"], "sandbox invocation did not succeed")
+                return _rejected(
+                    outcome["classification"],
+                    "sandbox invocation did not succeed",
+                    binding=binding,
+                )
             payload = _worker_payload(outcome["payload"])
             if payload["status"] == "rejected":
-                return _rejected("strategy_rejection", "strategy failed behavioral conformance")
+                return _rejected(
+                    "strategy_rejection",
+                    "strategy failed behavioral conformance",
+                    binding=binding,
+                    mismatches=_payload_mismatches(payload),
+                )
             diagnostics = outcome.get("diagnostics")
             if diagnostics is None:
                 diagnostics = outcome.get("sandbox", {}).get("diagnostics", {})
@@ -147,18 +157,15 @@ class RuntimeConformance:
         payload: dict[str, Any],
         diagnostics: Mapping[str, Any],
     ) -> dict[str, Any]:
-        package_hash = str(package_record["package_ref"]["package_hash"])
-        profile_hash = sha256_value(request["sandbox_profile"])
-        parameters_hash = sha256_value(request["parameters"])
-        scenario_hash = sha256_value(
-            [
-                {"sha256": item["sha256"], "bytes": item["bytes"]}
-                for item in request["behavioral_scenarios"]
-            ]
-        )
+        binding = _binding_identity(request, package_record)
+        package_hash = binding["package_hash"]
+        parameters_hash = binding["parameters_hash"]
+        profile_hash = binding["profile_hash"]
+        scenario_hash = binding["scenario_hash"]
         evidence = {
             "schema": "quant-runtime.behavioral-conformance-evidence.v1",
             "evidence_level": "behavioral-conformance",
+            "outcome": "passed",
             "package_hash": package_hash,
             "parameters_hash": parameters_hash,
             "profile_hash": profile_hash,
@@ -171,7 +178,13 @@ class RuntimeConformance:
         record_id = "sha256:" + digest
         try:
             publication = self._client.get_record(record_id)
-            if publication.get("payload") != evidence or len(publication.get("artifacts", [])) != 1:
+            artifacts = publication.get("artifacts")
+            if (
+                publication.get("record_type") != "quant-runtime.behavioral-conformance.v1"
+                or publication.get("payload") != evidence
+                or not isinstance(artifacts, list)
+                or len(artifacts) != 1
+            ):
                 raise ConformanceRequestError("conformance publication identity conflict")
         except WorkspaceError as exc:
             if exc.code != "record_not_found":
@@ -200,8 +213,13 @@ class RuntimeConformance:
                 ),
             )
         artifact = publication["artifacts"][0]
-        if artifact["sha256"] != sha256_bytes(canonical_json(evidence)):
+        if not isinstance(artifact, Mapping) or artifact.get("sha256") != sha256_bytes(
+            canonical_json(evidence)
+        ):
             raise ConformanceRequestError("conformance artifact identity mismatch")
+        verification = self._client.verify_artifact(str(artifact.get("uri", "")))
+        if verification.get("verified") is not True or verification.get("artifact") != artifact:
+            raise ConformanceRequestError("conformance artifact readback mismatch")
         reference = {
             "schema": "quant-runtime.behavioral-conformance-ref.v1",
             "conformance_id": record_id,
@@ -289,13 +307,74 @@ def _conformance_entrypoint(package_record: Mapping[str, Any]) -> str:
     return entrypoint
 
 
-def _rejected(classification: str, message: str) -> dict[str, Any]:
+def _binding_identity(
+    request: Mapping[str, Any], package_record: Mapping[str, Any]
+) -> dict[str, str]:
+    package_ref = package_record.get("package_ref")
+    if not isinstance(package_ref, Mapping):
+        raise ConformanceRequestError("registered package reference is unavailable")
+    registered_hash = package_ref.get("package_hash")
+    requested_hash = request.get("strategy_package", {}).get("package_hash")
+    if not isinstance(registered_hash, str) or registered_hash != requested_hash:
+        raise ConformanceRequestError("registered package hash does not match the request")
+    return {
+        "package_hash": registered_hash,
+        "parameters_hash": sha256_value(request["parameters"]),
+        "profile_hash": sha256_value(request["sandbox_profile"]),
+        "scenario_hash": sha256_value(
+            [
+                {"sha256": item["sha256"], "bytes": item["bytes"]}
+                for item in request["behavioral_scenarios"]
+            ]
+        ),
+    }
+
+
+def _payload_mismatches(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    mismatches: list[dict[str, Any]] = []
+    for item in payload.get("trace", []):
+        if isinstance(item, Mapping) and item.get("status") != "passed":
+            mismatches.append(
+                {
+                    key: item[key]
+                    for key in ("scenario", "dimension", "expected_hash", "observed_hash", "status")
+                    if key in item
+                }
+            )
+    for dimension, item in payload.get("dimensions", {}).items():
+        if isinstance(item, Mapping) and item.get("status") != "passed":
+            mismatches.append(
+                {
+                    "dimension": dimension,
+                    **{
+                        key: item[key]
+                        for key in ("observed", "expected_hash", "observed_hash", "status")
+                        if key in item
+                    },
+                }
+            )
+    return mismatches
+
+
+def _rejected(
+    classification: str,
+    message: str,
+    *,
+    binding: Mapping[str, str] | None = None,
+    mismatches: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    observation: dict[str, Any] = {
+        "classification": classification,
+        "code": "behavioral_conformance_failed",
+        "message": message,
+    }
+    if binding is not None:
+        observation["receipt_status"] = "failed"
+        observation["receipt_binding"] = dict(binding)
+    if mismatches:
+        observation["mismatches"] = mismatches
     return {
         "schema": "quant-research.runtime-conformance-result.v1",
         "status": "rejected",
-        "observation": {
-            "classification": classification,
-            "code": "behavioral_conformance_failed",
-            "message": message,
-        },
+        "observation": observation,
     }
