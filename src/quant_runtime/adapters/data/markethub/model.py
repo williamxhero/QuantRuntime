@@ -164,7 +164,11 @@ class CanonicalDataset:
         self.validate()
         value = {
             "schema": "quant-runtime.canonical-daily.v1",
-            "data_version": self.data_version,
+            # data_version is the live MarketHub-wide health token.  It may
+            # advance for unrelated datasets while this published daily vector
+            # remains immutable, so it is recorded in the manifest but is not
+            # part of the canonical content identity.
+            "dataset_id": "stock_daily_1d",
             "dataset_version": self.dataset_version,
             "timezone": self.timezone,
             "instruments": [item.hash_record() for item in self.instruments],

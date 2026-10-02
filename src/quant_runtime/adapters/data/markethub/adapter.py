@@ -28,7 +28,7 @@ from .cache import CacheUse, MarketHubCache
 from .contract import SnapshotRequest, validate_snapshot_manifest
 from .storage import AdapterStorage
 
-ADAPTER_VERSION = "1.0.1"
+ADAPTER_VERSION = "1.0.2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,7 +262,9 @@ class MarketHubDataAdapter:
                     )
                 return ResolvedSnapshot(manifest, manifest_path, dataset)
             verification = self.read(request, expected_revision=expected_revision)
-            if declared is not None and declared != verification.manifest_value:
+            if declared is not None and not _verification_matches(
+                declared, verification.manifest_value
+            ):
                 raise MarketHubContractError("reference snapshot verification drifted")
             return ResolvedSnapshot(manifest, manifest_path, verification.dataset)
 
@@ -411,7 +413,9 @@ class MarketHubDataAdapter:
         if any(not item["complete"] for item in coverage):
             raise MarketHubContractError(f"snapshot coverage is incomplete: {coverage!r}")
         actual_revision = dataset.reference_revision
-        if expected_revision is not None and actual_revision != expected_revision:
+        if expected_revision is not None and not _reference_revision_matches(
+            dataset, expected_revision
+        ):
             raise MarketHubContractError(
                 "MarketHub reference snapshot drifted before read: "
                 f"{expected_revision!r} -> {actual_revision!r}"
@@ -684,6 +688,53 @@ def _materialize_ref(
         "sha256": artifact["sha256"],
         "content_bytes": artifact["bytes"],
     }
+
+
+def _reference_revision_matches(
+    dataset: CanonicalDataset | CanonicalFuturesDataset,
+    expected: str,
+) -> bool:
+    """Match a frozen reference on its immutable published vector.
+
+    ``mhf`` is a MarketHub-wide health token and may advance for an unrelated
+    publication.  A daily reference is stable when its ``stock_daily_1d``
+    dataset version and adjustment series are unchanged.  Futures keep their
+    stricter lineage identity.
+    """
+
+    actual = dataset.reference_revision
+    if actual == expected:
+        return True
+    if not isinstance(dataset, CanonicalDataset):
+        return False
+    expected_base, separator, expected_adjustment = expected.partition(";adjustment:")
+    actual_base, actual_separator, actual_adjustment = actual.partition(";adjustment:")
+    if not separator:
+        expected_adjustment = "none"
+    if not actual_separator:
+        actual_adjustment = "none"
+    _, expected_version_separator, expected_dataset_version = expected_base.partition(":")
+    _, actual_version_separator, actual_dataset_version = actual_base.partition(":")
+    return (
+        bool(expected_version_separator and actual_version_separator)
+        and expected_dataset_version == actual_dataset_version == dataset.dataset_version
+        and expected_adjustment == actual_adjustment == dataset.adjustment
+    )
+
+
+def _verification_matches(expected: dict[str, Any], actual: dict[str, Any]) -> bool:
+    """Compare immutable vector evidence without pinning the live global token."""
+
+    return all(
+        expected.get(key) == actual.get(key)
+        for key in (
+            "canonical_input_hash",
+            "dataset_version",
+            "catalog_hash",
+            "calendar_hash",
+            "coverage_hash",
+        )
+    )
 
 
 def _identity_without_time(value: dict[str, Any]) -> bytes:
