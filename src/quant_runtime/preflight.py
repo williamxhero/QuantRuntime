@@ -7,6 +7,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Protocol
 
+from strategy_workspace import WorkspaceError
+
 from quant_runtime.adapters.data.markethub import (
     MarketHubContractError,
     MarketHubDataAdapter,
@@ -24,6 +26,9 @@ from quant_runtime.sandbox.policy import SandboxPolicyRegistry
 
 class WorkspacePreflightClientPort(Protocol):
     def get_registered_package(self, package_ref: Mapping[str, Any]) -> dict[str, Any]: ...
+    def validate_parameters(
+        self, package_ref: Mapping[str, Any], parameters: Mapping[str, Any]
+    ) -> dict[str, Any]: ...
     def verify_artifact(self, artifact_uri: str) -> dict[str, Any]: ...
     def materialize_artifact(self, artifact_uri: str, destination: Path) -> dict[str, Any]: ...
     def get_record(self, record_id: str) -> dict[str, Any]: ...
@@ -31,6 +36,10 @@ class WorkspacePreflightClientPort(Protocol):
 
 class PreflightRequestError(ValueError):
     pass
+
+
+class FormalInputError(PreflightRequestError):
+    """A package parameter object cannot be admitted to formal execution."""
 
 
 class RuntimePreflight:
@@ -99,6 +108,8 @@ class RuntimePreflight:
             if observation is not None:
                 result["observation"] = observation
             return result
+        except FormalInputError as exc:
+            return _failure("formal_input_invalid", "formal_input_invalid", str(exc))
         except PreflightRequestError as exc:
             return _failure("request_invalid", "preflight_request_invalid", str(exc))
         except SignalSeriesUnavailable as exc:
@@ -384,6 +395,12 @@ def _validate_local_request(
     request: SnapshotRequest,
 ) -> dict[str, Any]:
     package_record = client.get_registered_package(value["strategy_package"])
+    try:
+        value["parameters"] = client.validate_parameters(
+            value["strategy_package"], value["parameters"]
+        )
+    except WorkspaceError as exc:
+        raise FormalInputError(exc.message) from exc
     # V1 registrations remain on their historical admission path. New S2 v2
     # packages cannot bypass conformance by choosing a legacy draft schema.
     price_limit_receipt = _requires_price_limit_receipt(package_record)
