@@ -26,6 +26,9 @@ DIMENSIONS = frozenset(
 
 class WorkspaceConformancePort(Protocol):
     def get_registered_package(self, package_ref: Mapping[str, Any]) -> dict[str, Any]: ...
+    def validate_parameters(
+        self, package_ref: Mapping[str, Any], parameters: Mapping[str, Any]
+    ) -> dict[str, Any]: ...
     def verify_artifact(self, artifact_uri: str) -> dict[str, Any]: ...
     def materialize_artifact(self, artifact_uri: str, destination: Any) -> dict[str, Any]: ...
     def publish_record(
@@ -53,6 +56,12 @@ class RuntimeConformance:
         try:
             value = _request(request)
             package_record = self._client.get_registered_package(value["strategy_package"])
+            try:
+                value["parameters"] = self._client.validate_parameters(
+                    value["strategy_package"], value["parameters"]
+                )
+            except WorkspaceError as exc:
+                return _rejected("formal_input_invalid", exc.message)
             binding = _binding_identity(value, package_record)
             scenarios = {
                 f"scenario-{index:04d}.json": artifact
