@@ -171,10 +171,11 @@ class MarketHubClient:
                     == frozen.futures_contract_dataset_version
                 )
         else:
-            stable = (
-                current.data_version == frozen.data_version
-                and current.daily_dataset_version == frozen.daily_dataset_version
-            )
+            # Daily formal reads are pinned by the published stock_daily_1d
+            # vector.  The global market token also covers unrelated facts and
+            # may advance without changing this vector; rejecting that token
+            # would make an otherwise immutable historical read live-sensitive.
+            stable = current.daily_dataset_version == frozen.daily_dataset_version
         if not stable:
             raise MarketHubContractError(f"MarketHub version drift: {frozen!r} -> {current!r}")
 
