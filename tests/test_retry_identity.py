@@ -91,9 +91,47 @@ def test_exact_request_replay_is_idempotent(tmp_path: Path) -> None:
     assert first["record_id"].startswith("sandbox-input-v2.")
 
 
+def _write_minimal_package(root: Path) -> Path:
+    root.mkdir()
+    (root / "strategy.toml").write_text(
+        """schema = \"quant-research.strategy-package.v1\"
+strategy_id = \"fixture.identity\"
+revision = 1
+display_name = \"Identity fixture\"
+parameter_schema = \"parameters.schema.json\"
+
+[pipeline]
+discovery = \"forbidden\"
+formal = \"required\"
+
+[requirements]
+asset_classes = [\"equity\"]
+frequencies = [\"1d\"]
+capabilities = [\"data.bar.1d\"]
+decision_intents = [\"target_weight\"]
+
+[implementations.formal]
+nautilus = \"strategy.py:Fixture\"
+
+[dependencies]
+markethub_contract = \"v2\"
+""",
+        encoding="utf-8",
+    )
+    (root / "parameters.schema.json").write_text(
+        '{"$schema":"https://json-schema.org/draft/2020-12/schema",'
+        '"type":"object","additionalProperties":false,'
+        '"properties":{"fixture_mode":{"const":"formal"}},'
+        '"required":["fixture_mode"]}',
+        encoding="utf-8",
+    )
+    (root / "strategy.py").write_text("class Fixture:\n    pass\n", encoding="utf-8")
+    return root
+
+
 def test_changed_request_gets_new_workspace_run_id(tmp_path: Path) -> None:
     client = WorkspaceClient(tmp_path / "workspace")
-    package = client.register_package(Path(__file__).parent / "fixtures" / "noop-strategy")
+    package = client.register_package(_write_minimal_package(tmp_path / "package"))
     request = {
         "schema": "quant-research.workspace-run-request.v2",
         "strategy_package": package["package_ref"],
