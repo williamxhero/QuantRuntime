@@ -10,13 +10,14 @@ import tarfile
 import time
 import uuid
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import Any
 
 import psutil
 
-from quant_runtime.artifacts import read_json, sha256_value, write_json
+from quant_runtime.artifacts import sha256_value, write_json
 from quant_runtime.sandbox.invocation import PreparedSandboxInvocation
 from quant_runtime.sandbox.outcome import bounded_diagnostics, sandbox_outcome
 
@@ -31,6 +32,9 @@ MECHANISM_VERSION = (
 )
 PRODUCTION_PROCESS_LIMIT = 127
 OCI_PIDS_LIMIT = PRODUCTION_PROCESS_LIMIT + 1
+CONTROL_MOUNT = "/sandbox/control"
+CONTROL_RESULT = CONTROL_MOUNT + "/sandbox-result.json"
+CONTROL_READY = CONTROL_MOUNT + "/.ready"
 
 
 class OciBackendError(RuntimeError):
@@ -161,6 +165,7 @@ class OciSandboxBackend:
         name = "quant-runtime-" + uuid.uuid4().hex
         limits = profile["limits"]
         created = False
+        terminated = False
         try:
             self._control(
                 "create",
@@ -205,6 +210,9 @@ class OciSandboxBackend:
                 "/tmp:rw,noexec,nosuid,nodev,size=16777216",
                 "--tmpfs",
                 f"/sandbox/output:rw,noexec,nosuid,nodev,size={limits['filesystem_bytes']},mode=1777",
+                # Keep the control result off the user-artifact quota; it is still bounded.
+                "--tmpfs",
+                f"{CONTROL_MOUNT}:rw,noexec,nosuid,nodev,size={limits['filesystem_bytes']},mode=1777",
                 "--mount",
                 _bind(prepared.package.root, "/sandbox/package"),
                 "--mount",
@@ -215,7 +223,7 @@ class OciSandboxBackend:
                 "-m",
                 "quant_runtime.sandbox.worker",
                 "/sandbox/inputs/invocation.json",
-                "/sandbox/output/sandbox-result.json",
+                CONTROL_RESULT,
                 timeout=30,
             )
             created = True
@@ -227,11 +235,14 @@ class OciSandboxBackend:
                 wall_clock_seconds=limits["wall_clock_seconds"],
             )
             copied_output: Path | None = None
+            worker_bytes: bytes | None = None
             if status == "ready":
                 copied_output = self._export_output(
                     name, prepared.output, maximum_bytes=limits["filesystem_bytes"]
                 )
+                worker_bytes = self._read_result(name, maximum_bytes=limits["filesystem_bytes"])
                 self._terminate(name)
+                terminated = True
                 state = _json_output(
                     self._control("inspect", "--format", "{{json .State}}", name, timeout=15)
                 )
@@ -291,8 +302,7 @@ class OciSandboxBackend:
                     diagnostics=diagnostics,
                     proof=proof,
                 )
-            result_path = copied_output / "sandbox-result.json"
-            if state.get("ExitCode") != 0 and not result_path.is_file():
+            if state.get("ExitCode") != 0 and worker_bytes is None:
                 return _result(
                     prepared,
                     "engine_failure",
@@ -300,7 +310,15 @@ class OciSandboxBackend:
                     diagnostics=diagnostics,
                     proof=proof,
                 )
-            worker = read_json(result_path)
+            if worker_bytes is None:
+                return _result(
+                    prepared,
+                    "engine_failure",
+                    {"code": "sandbox_worker_terminated_without_result"},
+                    diagnostics=diagnostics,
+                    proof=proof,
+                )
+            worker = _read_json_bytes(worker_bytes)
             worker_classification = str(worker.get("classification", ""))
             if worker_classification not in {
                 "success",
@@ -334,7 +352,7 @@ class OciSandboxBackend:
                 proof=proof,
             )
         except Exception as exc:
-            if created:
+            if created and not terminated:
                 self._terminate(name)
             return _result(
                 prepared,
@@ -379,7 +397,7 @@ class OciSandboxBackend:
                 "-c",
                 (
                     "from pathlib import Path; "
-                    "raise SystemExit(not Path('/sandbox/output/.ready').is_file())"
+                    f"raise SystemExit(not Path({CONTROL_READY!r}).is_file())"
                 ),
                 timeout=15,
                 check=False,
@@ -641,6 +659,29 @@ class OciSandboxBackend:
         ]
         return subprocess.Popen(command, **kwargs)
 
+    def _read_result(self, name: str, *, maximum_bytes: int) -> bytes:
+        completed = subprocess.run(
+            [
+                self._docker,
+                "exec",
+                name,
+                "/usr/local/bin/python",
+                "-c",
+                (
+                    "import sys; from pathlib import Path; "
+                    "sys.stdout.buffer.write(Path(sys.argv[1]).read_bytes())"
+                ),
+                CONTROL_RESULT,
+            ],
+            check=False,
+            capture_output=True,
+            timeout=30,
+            shell=False,
+        )
+        if completed.returncode != 0 or len(completed.stdout) > maximum_bytes:
+            raise OciBackendError("bounded worker result read failed")
+        return completed.stdout
+
     def _export_output(self, name: str, destination: Path, *, maximum_bytes: int) -> Path:
         completed = subprocess.run(
             [
@@ -766,6 +807,16 @@ def _json_output(completed: subprocess.CompletedProcess[str]) -> Any:
         return json.loads(completed.stdout)
     except json.JSONDecodeError as exc:
         raise OciBackendError("Docker Engine returned an invalid control response") from exc
+
+
+def _read_json_bytes(value: bytes) -> dict[str, Any]:
+    try:
+        decoded = json.loads(value.decode("utf-8"), parse_float=Decimal)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot read sandbox worker result JSON: {exc}") from exc
+    if not isinstance(decoded, dict):
+        raise ValueError("sandbox worker result JSON root must be an object")
+    return decoded
 
 
 def _result(
