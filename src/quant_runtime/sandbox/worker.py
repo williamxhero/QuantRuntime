@@ -16,7 +16,7 @@ def main(argv: list[str] | None = None) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] == "--candidate":
         return _candidate(arguments[1:])
-    if len(arguments) != 2:
+    if len(arguments) not in {2, 3}:
         return 2
     result_path = Path(arguments[1])
     candidate = subprocess.Popen(
@@ -40,17 +40,18 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _candidate(arguments: list[str]) -> int:
-    if len(arguments) != 2:
+    if len(arguments) not in {2, 3}:
         return 2
     protocol_path = Path(arguments[0])
     result_path = Path(arguments[1])
+    output_path = Path(arguments[2]) if len(arguments) == 3 else result_path.parent
     protocol = _read(protocol_path)
     if protocol.get("phase") == "behavioral_conformance":
         return _conformance(protocol, result_path)
     if protocol.get("phase") == "discovery":
-        return _discovery(protocol, result_path)
+        return _discovery(protocol, result_path, output_path)
     if protocol.get("phase") == "formal":
-        return _formal(protocol, result_path)
+        return _formal(protocol, result_path, output_path)
     if protocol.get("phase") == "benchmark_factor":
         return _benchmark_factor(protocol, result_path)
     if protocol.get("phase") == "benchmark_strategy":
@@ -483,7 +484,7 @@ def _conformance_scenarios(protocol: dict[str, Any]) -> list[dict[str, Any]]:
     return scenarios
 
 
-def _discovery(protocol: dict[str, Any], result_path: Path) -> int:
+def _discovery(protocol: dict[str, Any], result_path: Path, output_path: Path) -> int:
     from quant_runtime.adapters.discovery.qlib.adapter import (
         QlibStrategyError,
         run_qlib_discovery_frame,
@@ -528,7 +529,7 @@ def _discovery(protocol: dict[str, Any], result_path: Path) -> int:
             parameters=parameters,
             snapshot_id=config["snapshot_id"],
             frame=frame,
-            output=result_path.parent,
+            output=output_path,
         )
     except QlibStrategyError:
         _write(
@@ -560,7 +561,7 @@ def _discovery(protocol: dict[str, Any], result_path: Path) -> int:
     return 0
 
 
-def _formal(protocol: dict[str, Any], result_path: Path) -> int:
+def _formal(protocol: dict[str, Any], result_path: Path, output_path: Path) -> int:
     from quant_runtime.adapters.formal.nautilus.adapter import (
         NautilusStrategyError,
         NautilusWorkspaceAdapter,
@@ -609,7 +610,7 @@ def _formal(protocol: dict[str, Any], result_path: Path) -> int:
                 package=package,
                 parameters=parameters,
                 snapshot=snapshot,
-                output=result_path.parent,
+                output=output_path,
                 config=config["config"],
                 cache_path=None,
                 cache_policy=str(config.get("cache_policy", "none")),
