@@ -292,6 +292,9 @@ class RuntimeExecutor:
                     package_record=package_record,
                     package=package,
                     profile=_object(request, "sandbox_profile"),
+                    conformance=request.get("behavioral_conformance"),
+                    request_schema=str(request["schema"]),
+                    request_hash=request_hash,
                     parameters=parameters,
                     snapshot=snapshot,
                     output=output / "discovery" / plan.discovery_adapter,
@@ -325,6 +328,9 @@ class RuntimeExecutor:
                         package_record=package_record,
                         package=package,
                         profile=_object(request, "sandbox_profile"),
+                        conformance=request.get("behavioral_conformance"),
+                        request_schema=str(request["schema"]),
+                        request_hash=request_hash,
                         parameters=parameters,
                         snapshot=snapshot,
                         output=output / "formal" / item.formal_id,
@@ -421,30 +427,30 @@ class RuntimeExecutor:
         package_record: dict[str, Any],
         package: StrategyPackage,
         profile: dict[str, Any],
+        conformance: Any,
+        request_schema: str,
+        request_hash: str,
         parameters: dict[str, Any],
         snapshot: ResolvedSnapshot,
         output: Path,
         config: dict[str, Any],
     ) -> tuple[DiscoveryAdapterResult | None, dict[str, Any]]:
         capsule = build_discovery_capsule(snapshot)
+        input_identity = sandbox_input_identity(
+            request_schema=request_schema,
+            request_hash=request_hash,
+            package=package,
+            profile=profile,
+            conformance=conformance,
+            parameters=parameters,
+            snapshot=snapshot,
+            capsule_id=str(capsule["capsule_id"]),
+            phase="discovery",
+            phase_id="qlib",
+            config=config,
+        )
         publication = self.client.publish_record(
-            {
-                "record_id": "sandbox-input."
-                + sha256_value(
-                    {
-                        "capsule_id": capsule["capsule_id"],
-                        "parameters_hash": sha256_value(parameters),
-                    }
-                ),
-                "record_type": "quant-runtime.sandbox-input.v1",
-                "created_at": snapshot.manifest["resolved_at"],
-                "payload": {
-                    "schema": "quant-runtime.sandbox-input.v1",
-                    "snapshot_id": snapshot.snapshot_id,
-                    "capsule_id": capsule["capsule_id"],
-                    "parameters_hash": sha256_value(parameters),
-                },
-            },
+            sandbox_input_publication(input_identity),
             artifacts=(
                 {
                     "source": capsule_bytes(capsule),
@@ -505,6 +511,9 @@ class RuntimeExecutor:
         package_record: dict[str, Any],
         package: StrategyPackage,
         profile: dict[str, Any],
+        conformance: Any,
+        request_schema: str,
+        request_hash: str,
         parameters: dict[str, Any],
         snapshot: ResolvedSnapshot,
         output: Path,
@@ -513,29 +522,21 @@ class RuntimeExecutor:
         if execution.adapter != "nautilus":
             raise ValueError("sandbox formal execution requires the registered Nautilus adapter")
         capsule = build_snapshot_capsule(snapshot)
+        input_identity = sandbox_input_identity(
+            request_schema=request_schema,
+            request_hash=request_hash,
+            package=package,
+            profile=profile,
+            conformance=conformance,
+            parameters=parameters,
+            snapshot=snapshot,
+            capsule_id=str(capsule["capsule_id"]),
+            phase="formal",
+            phase_id=execution.formal_id,
+            config=execution.config,
+        )
         publication = self.client.publish_record(
-            {
-                "record_id": "sandbox-input."
-                + sha256_value(
-                    {
-                        "phase": "formal",
-                        "formal_id": execution.formal_id,
-                        "capsule_id": capsule["capsule_id"],
-                        "parameters_hash": sha256_value(parameters),
-                        "config_hash": sha256_value(execution.config),
-                    }
-                ),
-                "record_type": "quant-runtime.sandbox-input.v1",
-                "created_at": snapshot.manifest["resolved_at"],
-                "payload": {
-                    "schema": "quant-runtime.sandbox-input.v1",
-                    "phase": "formal",
-                    "formal_id": execution.formal_id,
-                    "snapshot_id": snapshot.snapshot_id,
-                    "capsule_id": capsule["capsule_id"],
-                    "parameters_hash": sha256_value(parameters),
-                },
-            },
+            sandbox_input_publication(input_identity),
             artifacts=(
                 {
                     "source": snapshot_capsule_bytes(capsule),
@@ -637,6 +638,87 @@ def _object(value: Mapping[str, Any], name: str) -> dict[str, Any]:
     if not isinstance(item, Mapping):
         raise ValueError(f"{name} must be an object")
     return dict(item)
+
+
+def sandbox_input_identity(
+    *,
+    request_schema: str,
+    request_hash: str,
+    package: StrategyPackage,
+    profile: Mapping[str, Any],
+    conformance: Any,
+    parameters: Mapping[str, Any],
+    snapshot: ResolvedSnapshot,
+    capsule_id: str,
+    phase: str,
+    phase_id: str,
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive the immutable identity for one sandbox input publication.
+
+    Every value that can change the sealed execution is represented here. In particular,
+    ``resolved_at`` belongs to the frozen Workspace request and must be part of the
+    identity because it is also the publication timestamp; omitting it would make a
+    changed retry collide with an older immutable publication.
+    """
+    conformance_value = dict(conformance) if isinstance(conformance, Mapping) else None
+    profile_value = dict(profile)
+    package_ref = dict(package.package_ref)
+    oci_receipt = {
+        "containment": profile_value.get("containment"),
+        "dependency_environment": profile_value.get("dependency_environment"),
+    }
+    resolved_at = snapshot.manifest.get("resolved_at")
+    if not isinstance(resolved_at, str) or not resolved_at:
+        raise ValueError("sandbox snapshot lacks a stable resolved_at identity")
+    return {
+        "schema": "quant-runtime.sandbox-input-identity.v2",
+        "request_schema": request_schema,
+        "request_hash": request_hash,
+        "strategy_package": package_ref,
+        "package_manifest_hash": sha256_value(package.manifest),
+        "sandbox_profile": profile_value,
+        "sandbox_profile_hash": sha256_value(profile_value),
+        "oci_receipt_hash": sha256_value(oci_receipt),
+        "behavioral_conformance_hash": (
+            sha256_value(conformance_value) if conformance_value is not None else None
+        ),
+        "parameters_hash": sha256_value(dict(parameters)),
+        "snapshot_id": snapshot.snapshot_id,
+        "snapshot_capsule_id": capsule_id,
+        "resolved_at": resolved_at,
+        "phase": phase,
+        "phase_id": phase_id,
+        "config_hash": sha256_value(dict(config)),
+    }
+
+
+def sandbox_input_publication(identity: Mapping[str, Any]) -> dict[str, Any]:
+    """Build the public immutable input record from its canonical identity."""
+    value = dict(identity)
+    return {
+        "record_id": "sandbox-input-v2." + sha256_value(value),
+        "record_type": "quant-runtime.sandbox-input.v1",
+        "created_at": value["resolved_at"],
+        "payload": {
+            "schema": "quant-runtime.sandbox-input.v1",
+            "identity_schema": value["schema"],
+            "request_schema": value["request_schema"],
+            "request_hash": value["request_hash"],
+            "strategy_package": value["strategy_package"],
+            "package_manifest_hash": value["package_manifest_hash"],
+            "sandbox_profile_hash": value["sandbox_profile_hash"],
+            "oci_receipt_hash": value["oci_receipt_hash"],
+            "behavioral_conformance_hash": value["behavioral_conformance_hash"],
+            "parameters_hash": value["parameters_hash"],
+            "snapshot_id": value["snapshot_id"],
+            "snapshot_capsule_id": value["snapshot_capsule_id"],
+            "resolved_at": value["resolved_at"],
+            "phase": value["phase"],
+            "phase_id": value["phase_id"],
+            "config_hash": value["config_hash"],
+        },
+    }
 
 
 def _policy_rejection_outcome(profile: Mapping[str, Any]) -> dict[str, Any]:
