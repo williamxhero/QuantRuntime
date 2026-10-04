@@ -224,6 +224,7 @@ class OciSandboxBackend:
                 "quant_runtime.sandbox.worker",
                 "/sandbox/inputs/invocation.json",
                 CONTROL_RESULT,
+                "/sandbox/output",
                 timeout=30,
             )
             created = True
