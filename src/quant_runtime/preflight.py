@@ -252,10 +252,7 @@ def validate_frozen_transport(
         evidence.get("strategy_package") != value["strategy_package"]
         or evidence.get("verification") != snapshot.get("verification")
         or evidence.get("data_semantics") != snapshot.get("data_semantics")
-        or (
-            sandboxed
-            and evidence.get("behavioral_conformance") != value["behavioral_conformance"]
-        )
+        or (sandboxed and evidence.get("behavioral_conformance") != value["behavioral_conformance"])
     ):
         raise PreflightRequestError("frozen preflight evidence does not match the request")
     if "legacy_admission" in evidence and (
