@@ -38,6 +38,27 @@ class PreflightRequestError(ValueError):
     pass
 
 
+class PriceLimitConformanceRequired(PreflightRequestError):
+    """A new price-limit package cannot be admitted without conformance evidence."""
+
+
+HISTORICAL_PRICE_LIMIT_PACKAGE_REF = {
+    "schema": "quant-research.strategy-package-ref.v1",
+    "strategy_id": "equity.cross-sectional-momentum-topk",
+    "revision": 1,
+    "package_hash": "2e938c502c2d617e5215f580f18096350d69ff710797d82c371623c4cb72241e",
+}
+HISTORICAL_PRICE_LIMIT_LEGACY_ADMISSION = {
+    "schema": "quant-runtime.price-limit-admission.v1",
+    "status": "historical_legacy",
+    "reason": "admitted before price-limit behavioral conformance was required",
+    "strategy_package": dict(HISTORICAL_PRICE_LIMIT_PACKAGE_REF),
+    "migration": (
+        "publish a new strategy-package.v2 revision with implementations.conformance.runtime"
+    ),
+}
+
+
 class FormalInputError(PreflightRequestError):
     """A package parameter object cannot be admitted to formal execution."""
 
@@ -63,7 +84,7 @@ class RuntimePreflight:
             value = _draft(draft)
             snapshot_value = _snapshot_request(value["snapshot_request"])
             request = SnapshotRequest.from_dict(snapshot_value)
-            _validate_local_request(
+            legacy_admission = _validate_local_request(
                 self.client, self.registry, self.policy_registry, value, request
             )
             required_semantics = _required_semantics(snapshot_value)
@@ -103,6 +124,11 @@ class RuntimePreflight:
                         }
                         else {}
                     ),
+                    **(
+                        {"legacy_admission": legacy_admission}
+                        if legacy_admission is not None
+                        else {}
+                    ),
                 },
             }
             if observation is not None:
@@ -110,6 +136,8 @@ class RuntimePreflight:
             return result
         except FormalInputError as exc:
             return _failure("formal_input_invalid", "formal_input_invalid", str(exc))
+        except PriceLimitConformanceRequired as exc:
+            return _failure("request_invalid", "price_limit_conformance_required", str(exc))
         except PreflightRequestError as exc:
             return _failure("request_invalid", "preflight_request_invalid", str(exc))
         except SignalSeriesUnavailable as exc:
@@ -206,21 +234,33 @@ def validate_frozen_transport(
         or snapshot.get("required_semantics") != list(_required_semantics(request_value))
     ):
         raise PreflightRequestError("frozen snapshot does not match the request")
-    required_evidence = {
-        "strategy_package",
-        "verification",
-        "data_semantics",
-        "behavioral_conformance",
+    required_evidence = {"strategy_package", "verification", "data_semantics"}
+    sandboxed = value["schema"] in {
+        "quant-research.runtime-preflight-request.v2",
+        "quant-research.runtime-preflight-request.v3",
     }
-    if set(evidence) != required_evidence:
+    if sandboxed:
+        required_evidence.add("behavioral_conformance")
+    allowed_evidence = required_evidence | (
+        {"legacy_admission"}
+        if not sandboxed and evidence.get("legacy_admission") is not None
+        else set()
+    )
+    if set(evidence) != allowed_evidence:
         raise PreflightRequestError("frozen preflight evidence fields are invalid")
     if (
         evidence.get("strategy_package") != value["strategy_package"]
         or evidence.get("verification") != snapshot.get("verification")
         or evidence.get("data_semantics") != snapshot.get("data_semantics")
-        or evidence.get("behavioral_conformance") != value["behavioral_conformance"]
+        or (sandboxed and evidence.get("behavioral_conformance") != value["behavioral_conformance"])
     ):
         raise PreflightRequestError("frozen preflight evidence does not match the request")
+    if "legacy_admission" in evidence and (
+        sandboxed
+        or evidence["legacy_admission"] != HISTORICAL_PRICE_LIMIT_LEGACY_ADMISSION
+        or evidence["strategy_package"] != HISTORICAL_PRICE_LIMIT_PACKAGE_REF
+    ):
+        raise PreflightRequestError("frozen preflight legacy admission marker is invalid")
     if versioned_observation:
         _validate_data_observation(result.get("observation"), snapshot_value)
     return value, request
@@ -387,13 +427,38 @@ def _requires_price_limit_receipt(package_record: Mapping[str, Any]) -> bool:
     return "market.cn.equity.price_limit" in capabilities
 
 
+def _legacy_price_limit_admission(package_record: Mapping[str, Any]) -> dict[str, Any] | None:
+    manifest = package_record.get("manifest")
+    if not isinstance(manifest, Mapping):
+        raise PreflightRequestError("registered package manifest is invalid")
+    requirements = manifest.get("requirements")
+    if not isinstance(requirements, Mapping):
+        raise PreflightRequestError("registered package requirements are invalid")
+    capabilities = requirements.get("capabilities")
+    if not isinstance(capabilities, list):
+        raise PreflightRequestError("registered package capabilities are invalid")
+    if (
+        manifest.get("schema") != "quant-research.strategy-package.v1"
+        or "market.cn.equity.price_limit" not in capabilities
+    ):
+        return None
+    package_ref = package_record.get("package_ref")
+    if package_ref == HISTORICAL_PRICE_LIMIT_PACKAGE_REF:
+        return dict(HISTORICAL_PRICE_LIMIT_LEGACY_ADMISSION)
+    raise PriceLimitConformanceRequired(
+        "price-limit behavioral conformance receipt is required for new strategy-package.v1 "
+        "declarations; schema v1 cannot express implementations.conformance, so publish a "
+        "new conformance-enabled strategy-package.v2 revision"
+    )
+
+
 def _validate_local_request(
     client: WorkspacePreflightClientPort,
     registry: AdapterRegistry,
     policy_registry: SandboxPolicyRegistry,
     value: Mapping[str, Any],
     request: SnapshotRequest,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     package_record = client.get_registered_package(value["strategy_package"])
     try:
         value["parameters"] = client.validate_parameters(
@@ -401,15 +466,15 @@ def _validate_local_request(
         )
     except WorkspaceError as exc:
         raise FormalInputError(exc.message) from exc
-    # V1 registrations remain on their historical admission path. New S2 v2
-    # packages cannot bypass conformance by choosing a legacy draft schema.
+    legacy_admission = _legacy_price_limit_admission(package_record)
+    # New packages cannot bypass conformance by choosing a legacy draft schema.
     price_limit_receipt = _requires_price_limit_receipt(package_record)
     sandboxed = value["schema"] in {
         "quant-research.runtime-preflight-request.v2",
         "quant-research.runtime-preflight-request.v3",
     }
     if price_limit_receipt and not sandboxed:
-        raise PreflightRequestError(
+        raise PriceLimitConformanceRequired(
             "price-limit behavioral conformance receipt is required; "
             "use a sandboxed preflight request with the current receipt"
         )
@@ -446,7 +511,7 @@ def _validate_local_request(
             discovery_implementations=package.implementations("discovery"),
             formal_implementations=package.implementations("formal"),
         )
-    return package_record
+    return legacy_admission
 
 
 def _draft(value: Mapping[str, Any]) -> dict[str, Any]:

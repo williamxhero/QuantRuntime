@@ -89,6 +89,17 @@ uv run strategy-workspace --root $env:STRATEGY_WORKSPACE_ROOT package register <
 
 注册会生成内容哈希。不要手工修改注册后的包引用，也不要把策略实现放入 Quant Runtime。
 
+### 价格限制能力的准入兼容性
+
+新的人工策略包只要声明 `market.cn.equity.price_limit`，就必须通过 Runtime 的行为一致性收据门禁。`quant-research.strategy-package.v1` 无法表达
+`implementations.conformance`，因此声明该能力的新 v1 包会以类型化的
+`price_limit_conformance_required` 拒绝；不能用旧版请求 Schema 绕过门禁。
+
+已有的 Reference 包 `equity.cross-sectional-momentum-topk` revision 1 是历史准入例外。Runtime 会在预检证据中标记
+`schema=quant-runtime.price-limit-admission.v1`、`status=historical_legacy`，但不会改写或重新注册它的包记录和字节。迁移时应复制策略并递增 revision，发布新的
+`quant-research.strategy-package.v2` 包，同时加入
+`[implementations.conformance] runtime = "conformance.py:conform"`，再为新包生成当前行为一致性收据。
+
 ## 生成研究请求
 
 请求必须符合 Strategy Workspace 内置的 `quant-research.workspace-run-request.v2` Schema。以目标策略包的 `examples/*.json` 为模板，并填满全部占位符。至少核对：
