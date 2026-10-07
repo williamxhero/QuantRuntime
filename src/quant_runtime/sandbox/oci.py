@@ -30,6 +30,9 @@ SUPPORTED_RUNC = "1.3.4"
 MECHANISM_VERSION = (
     f"docker-{SUPPORTED_ENGINE}/containerd-{SUPPORTED_CONTAINERD}/runc-{SUPPORTED_RUNC}"
 )
+# Only an owner-approved worker image may be pinned here; no current approval is recorded.
+# None deliberately disables OCI execution instead of reusing an obsolete test/build image.
+APPROVED_OCI_IMAGE: str | None = None
 PRODUCTION_PROCESS_LIMIT = 127
 OCI_PIDS_LIMIT = PRODUCTION_PROCESS_LIMIT + 1
 CONTROL_MOUNT = "/sandbox/control"
@@ -47,18 +50,41 @@ class OciSandboxConfig:
     docker_executable: str = "docker"
 
     def __post_init__(self) -> None:
-        remote_digest = "@sha256:" in self.image and len(self.image.rsplit("@sha256:", 1)[1]) == 64
-        local_digest = self.image.startswith("sha256:") and len(self.image) == 71
-        if not remote_digest and not local_digest:
-            raise ValueError("OCI sandbox image must be pinned by repository digest")
+        approved = approved_oci_image()
+        _image_digest(self.image)
+        if self.image != approved:
+            raise ValueError("OCI sandbox image does not match the approved OCI image")
 
     @property
     def image_digest(self) -> str:
-        return (
-            self.image
-            if self.image.startswith("sha256:")
-            else "sha256:" + self.image.rsplit("@sha256:", 1)[1]
-        )
+        return _image_digest(self.image)
+
+
+def approved_oci_image() -> str:
+    image = APPROVED_OCI_IMAGE
+    if image is None or image == "":
+        raise ValueError("OCI approved image identity is missing")
+    try:
+        _image_digest(image)
+    except ValueError as exc:
+        raise ValueError("OCI approved image identity is invalid") from exc
+    return image
+
+
+def _image_digest(image: object) -> str:
+    if isinstance(image, str):
+        if _sha256_identity(image):
+            return image
+        repository, separator, digest = image.rpartition("@")
+        if (
+            repository
+            and separator
+            and "@" not in repository
+            and not any(item.isspace() for item in repository)
+            and _sha256_identity(digest)
+        ):
+            return digest
+    raise ValueError("OCI sandbox image must be pinned by repository digest")
 
 
 class OciSandboxBackend:
@@ -757,8 +783,8 @@ class OciSandboxBackend:
 
 
 def production_backend() -> OciSandboxBackend | Any:
-    image = os.environ.get("QUANT_RUNTIME_OCI_IMAGE", "")
-    if image:
+    image = os.environ.get("QUANT_RUNTIME_OCI_IMAGE", APPROVED_OCI_IMAGE)
+    if image is not None:
         return OciSandboxBackend(OciSandboxConfig(image=image))
     from quant_runtime.sandbox.backend import UnsupportedSandboxBackend
 
