@@ -60,6 +60,20 @@ uv run python -c "import httpx; print(httpx.get('http://HOST:PORT/api/health', t
 
 完成标准：导入成功、离线测试通过、构建成功、MarketHub 健康且目标数据集有版本号。联网测试可用 `uv run pytest -m connected`，但仓库内测试地址可能是维护者环境；其他电脑应先改为等价的外部连通性检查，不要把私人地址提交回仓库。
 
+### OCI worker 镜像准入
+
+`src/quant_runtime/sandbox/oci.py` 的 `APPROVED_OCI_IMAGE` 是生产 OCI worker 镜像的唯一批准源，
+只接受完整的 `sha256:<64 位小写十六进制>` 本地镜像 ID 或 `repository@sha256:<64 位小写十六进制>` 引用。
+当前没有可核验的最新批准摘要，因此该值明确为 `None`；不得把旧测试摘要或 Dockerfile 的基础镜像摘要当作批准。
+镜像所有者须在批准的 Linux Docker 主机上确认真实 worker 镜像及 containment/resource-enforcement 证据后，
+通过代码审查更新此常量。仓库外的本地 OCI 测试也必须读取此源，不得维护自己的镜像字面量。
+
+批准源缺失或无法解析时，显式配置 OCI 会在 Docker 探测前拒绝；无批准且无显式选择时返回不支持的 backend，
+不执行候选代码。配置有效时，Runtime 默认选择此批准引用；`QUANT_RUNTIME_OCI_IMAGE` 和
+`sandbox-proof --image` 只能选择完全相同的引用，不能绕过批准或静默回退到其他镜像。
+请求中的 `dependency_environment.identity` 仍必须匹配证明所绑定的镜像摘要，lock identity 与 containment proof
+也必须精确匹配。离线配置/不匹配测试不需要 Docker，但不能替代真实 OCI 隔离验证。
+
 ## 创建工作区
 
 为每位用户选择独立、可写、可备份的绝对路径。始终显式传入路径，不依赖 CLI 中维护者电脑的默认值。
