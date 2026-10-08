@@ -64,15 +64,56 @@ uv run python -c "import httpx; print(httpx.get('http://HOST:PORT/api/health', t
 
 `src/quant_runtime/sandbox/oci.py` 的 `APPROVED_OCI_IMAGE` 是生产 OCI worker 镜像的唯一批准源，
 只接受完整的 `sha256:<64 位小写十六进制>` 本地镜像 ID 或 `repository@sha256:<64 位小写十六进制>` 引用。
-当前没有可核验的最新批准摘要，因此该值明确为 `None`；不得把旧测试摘要或 Dockerfile 的基础镜像摘要当作批准。
-镜像所有者须在批准的 Linux Docker 主机上确认真实 worker 镜像及 containment/resource-enforcement 证据后，
-通过代码审查更新此常量。仓库外的本地 OCI 测试也必须读取此源，不得维护自己的镜像字面量。
+当前所有者批准的本地 worker 镜像 ID 为
+`sha256:fa7631435b780e7968992e5d55b0e0bc6cd89b6349afe98327e55df3227b7e0e`，
+本地标签为 `quant-runtime-sandbox-worker:20261008`，由本仓库的
+`containers/sandbox-worker.Dockerfile` 构建，运行用户为 `65534:65534`。
+其 `org.quant-runtime.dependency-lock` 标签为
+`sha256:5690bb318285226c8cd3a06ed91bdff9fd82fa05156f6db73ea923708d64be22`。
+
+2026-10-08 在本机产生的真实 containment proof 的 12 项 probes 全部为 true，
+`proof_id=sha256:61a4598aea2b929b640f246b8a5da1d115530be83c4aa94ebb4ee1934e5f5dc7`。
+该证据绑定 backend `docker-engine-linux-oci`、mechanism `linux-namespaces-cgroups-seccomp-oci`，
+以及 Docker 29.3.1 / containerd v2.2.1 / runc 1.3.4 / kernel
+`6.6.87.2-microsoft-standard-WSL2`。已验证控制包括只读 rootfs、只读输入 bind、限额输出 tmpfs、
+仅 loopback 的隔离网络 namespace、128 的 pids 上限、uid 65534、cap-drop-all、
+no-new-privileges、seccomp、不转发主机环境变量，以及 engine-kill 后确认容器已停止。
+此记录仅描述该主机上的验证，不代表其他主机也已通过验证。
+
+重建时先执行下列命令；将 `<version>` 与 `<date>` 替换为实际版本与标签日期：
+
+```text
+uv build --wheel
+docker build --build-arg RUNTIME_WHEEL=dist/quant_runtime-<version>-py3-none-any.whl -f containers/sandbox-worker.Dockerfile -t quant-runtime-sandbox-worker:<date> .
+```
+
+Dockerfile 的默认 `ARG RUNTIME_WHEEL` 仍指向 `dist/quant_runtime-0.2.3-py3-none-any.whl`，
+而当前包版本为 `0.2.7`；仅构建当前版本 wheel 后，不传 `--build-arg` 的 Docker 构建会因缺少旧 wheel 而失败。
+重建不自动批准新镜像，也不保证得到相同镜像 ID。镜像所有者须在目标 Linux Docker 主机上确认真实
+worker 镜像及 containment/resource-enforcement 证据后，通过代码审查更新此常量；
+不得把旧测试摘要或 Dockerfile 的基础镜像摘要当作批准。
+仓库外的本地 OCI 测试也必须读取此源，不得维护自己的镜像字面量。
+
+对当前批准镜像重新验证 containment，并对已注册策略包执行行为一致性验证（工作区与请求须明确提供）：
+
+```text
+uv run quant-runtime sandbox-proof --image sha256:fa7631435b780e7968992e5d55b0e0bc6cd89b6349afe98327e55df3227b7e0e
+uv run quant-runtime conformance --workspace <工作区绝对路径> --request <一致性请求.json>
+```
 
 批准源缺失或无法解析时，显式配置 OCI 会在 Docker 探测前拒绝；无批准且无显式选择时返回不支持的 backend，
 不执行候选代码。配置有效时，Runtime 默认选择此批准引用；`QUANT_RUNTIME_OCI_IMAGE` 和
 `sandbox-proof --image` 只能选择完全相同的引用，不能绕过批准或静默回退到其他镜像。
 请求中的 `dependency_environment.identity` 仍必须匹配证明所绑定的镜像摘要，lock identity 与 containment proof
 也必须精确匹配。离线配置/不匹配测试不需要 Docker，但不能替代真实 OCI 隔离验证。
+
+`benchmark-exec` 的 `production_attested_oci` 请求只有在 backend 不是 `OciSandboxBackend` 时才返回
+`blocked` / `benchmark_oci_unavailable`。已选择 OCI backend 后，无法验证 capability 或请求 profile
+不匹配会返回 `failed` / `policy_rejection`，payload code 为 `sandbox_capability_unverified`，不会执行候选代码。
+本地 CLI benchmark 测试须从批准源选择镜像，以当前真实 `sandbox-proof` 的 image、lock、containment 身份
+构造 profile，并绑定已证明的 process capacity；不能沿用空 profile 或假设批准镜像仍不可用。
+该成功路径应标记为 `oci`，验证 `completed` / `success`、真实 worker 输出与终止证据，同时保留单行 JSON
+及不含 Workspace run 字段的 transport-only 断言；不可用 backend 的离线拒绝测试仍须保留。
 
 ## 创建工作区
 
