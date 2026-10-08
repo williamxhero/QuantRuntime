@@ -30,9 +30,13 @@ SUPPORTED_RUNC = "1.3.4"
 MECHANISM_VERSION = (
     f"docker-{SUPPORTED_ENGINE}/containerd-{SUPPORTED_CONTAINERD}/runc-{SUPPORTED_RUNC}"
 )
-# Only an owner-approved worker image may be pinned here; no current approval is recorded.
-# None deliberately disables OCI execution instead of reusing an obsolete test/build image.
-APPROVED_OCI_IMAGE: str | None = None
+# Owner-approved sandbox worker; all 12 containment probes passed on the recorded WSL2 host.
+# Proof: sha256:61a4598aea2b929b640f246b8a5da1d115530be83c4aa94ebb4ee1934e5f5dc7
+# Docker 29.3.1 / containerd v2.2.1 / runc 1.3.4; kernel 6.6.87.2-microsoft-standard-WSL2.
+# Update through code review only when a new worker image is approved.
+APPROVED_OCI_IMAGE: str | None = (
+    "sha256:fa7631435b780e7968992e5d55b0e0bc6cd89b6349afe98327e55df3227b7e0e"
+)
 PRODUCTION_PROCESS_LIMIT = 127
 OCI_PIDS_LIMIT = PRODUCTION_PROCESS_LIMIT + 1
 CONTROL_MOUNT = "/sandbox/control"
