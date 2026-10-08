@@ -107,6 +107,14 @@ uv run quant-runtime conformance --workspace <工作区绝对路径> --request <
 请求中的 `dependency_environment.identity` 仍必须匹配证明所绑定的镜像摘要，lock identity 与 containment proof
 也必须精确匹配。离线配置/不匹配测试不需要 Docker，但不能替代真实 OCI 隔离验证。
 
+`benchmark-exec` 的 `production_attested_oci` 请求只有在 backend 不是 `OciSandboxBackend` 时才返回
+`blocked` / `benchmark_oci_unavailable`。已选择 OCI backend 后，无法验证 capability 或请求 profile
+不匹配会返回 `failed` / `policy_rejection`，payload code 为 `sandbox_capability_unverified`，不会执行候选代码。
+本地 CLI benchmark 测试须从批准源选择镜像，以当前真实 `sandbox-proof` 的 image、lock、containment 身份
+构造 profile，并绑定已证明的 process capacity；不能沿用空 profile 或假设批准镜像仍不可用。
+该成功路径应标记为 `oci`，验证 `completed` / `success`、真实 worker 输出与终止证据，同时保留单行 JSON
+及不含 Workspace run 字段的 transport-only 断言；不可用 backend 的离线拒绝测试仍须保留。
+
 ## 创建工作区
 
 为每位用户选择独立、可写、可备份的绝对路径。始终显式传入路径，不依赖 CLI 中维护者电脑的默认值。
