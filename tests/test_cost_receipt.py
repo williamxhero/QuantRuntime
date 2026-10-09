@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, cast
@@ -8,7 +9,7 @@ from typing import Any, cast
 import pytest
 from nautilus_trader.model.enums import OrderSide
 
-from quant_runtime.adapters.formal.nautilus.adapter import _formal_config
+from quant_runtime.adapters.formal.nautilus.adapter import _build_cost_receipt, _formal_config
 from quant_runtime.adapters.formal.nautilus.china_market_rules import FeeSpec, calculate_fee
 from quant_runtime.adapters.formal.nautilus.cost_receipt import (
     COST_RECEIPT_SCHEMA,
@@ -70,6 +71,21 @@ def test_empty_config_receipt_publishes_resolved_defaults() -> None:
     assert effective.initial_cash_cny == Decimal("1000000.00")
     assert effective.lot_size == 100
     assert effective.tick_size == Decimal("0.01")
+
+
+def test_direct_adapter_receipt_is_local_only_without_binding() -> None:
+    value = _formal_input({})
+    config = _formal_config(value)
+
+    assert _build_cost_receipt(value, config, "primary") is None
+
+
+def test_partial_adapter_binding_fails_closed() -> None:
+    value = replace(_formal_input({}), request_hash=HASH)
+    config = _formal_config(value)
+
+    with pytest.raises(ValueError, match="runtime image and lock identity"):
+        _build_cost_receipt(value, config, "primary")
 
 
 def test_explicit_config_is_normalized_and_receipt_is_bound() -> None:
@@ -186,6 +202,15 @@ def test_invalid_effective_values_are_rejected(field: str, value: Any) -> None:
 def test_malformed_or_unknown_request_config_is_rejected(config: dict[str, Any]) -> None:
     with pytest.raises(ValueError):
         _formal_config(_formal_input(config))
+
+
+def test_legacy_request_score_metadata_does_not_change_effective_cost() -> None:
+    value = replace(
+        _formal_input({"score": 2.0}),
+        request_schema="quant-research.workspace-run-request.v2",
+    )
+
+    assert _formal_config(value, allow_legacy_metadata=True) == _formal_config(_formal_input({}))
 
 
 def test_minimum_commission_and_sell_only_stamp_duty() -> None:
