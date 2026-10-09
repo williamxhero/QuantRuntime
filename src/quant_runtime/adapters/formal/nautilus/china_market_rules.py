@@ -30,14 +30,14 @@ class FeeSpec:
             raise ValueError("formal fees require CNY cent precision")
         if self.rounding_mode != "half_away_from_zero" or self.rounding_scope != "per_fill":
             raise ValueError("formal fees require per-fill half-away-from-zero rounding")
-        if (
-            min(
-                self.commission_rate,
-                self.minimum_commission_cny,
-                self.sell_stamp_duty_rate,
-            )
-            < 0
-        ):
+        values = (
+            self.commission_rate,
+            self.minimum_commission_cny,
+            self.sell_stamp_duty_rate,
+        )
+        if any(not value.is_finite() for value in values):
+            raise ValueError("fee rates and minimum commission must be finite")
+        if min(values) < 0:
             raise ValueError("fee rates and minimum commission must be non-negative")
 
 

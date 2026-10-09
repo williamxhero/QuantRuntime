@@ -27,28 +27,30 @@ class FormalOutput:
     fees: list[dict[str, Any]] = field(default_factory=list)
     native_statistics: dict[str, Any] = field(default_factory=dict)
     metrics: dict[str, Any] = field(default_factory=dict)
+    cost_receipt: dict[str, Any] | None = None
 
     def semantic_payload(self) -> dict[str, Any]:
-        return normalize_value(
-            {
-                "schema": "quant-runtime.nautilus-output.v1",
-                "framework": "NautilusTrader",
-                "framework_version": self.framework_version,
-                "data_version": self.data_version,
-                "dataset_version": self.dataset_version,
-                "canonical_input_hash": self.canonical_input_hash,
-                "strategy_spec_hash": self.strategy_spec_hash,
-                "decision_hash": self.decision_hash,
-                "decisions": self.decisions,
-                "orders": self.orders,
-                "rejects": self.rejects,
-                "fills": self.fills,
-                "positions": self.positions,
-                "account_curve": self.account_curve,
-                "fees": self.fees,
-                "native_statistics": _semantic_statistics(self.native_statistics),
-            }
-        )
+        payload = {
+            "schema": "quant-runtime.nautilus-output.v1",
+            "framework": "NautilusTrader",
+            "framework_version": self.framework_version,
+            "data_version": self.data_version,
+            "dataset_version": self.dataset_version,
+            "canonical_input_hash": self.canonical_input_hash,
+            "strategy_spec_hash": self.strategy_spec_hash,
+            "decision_hash": self.decision_hash,
+            "decisions": self.decisions,
+            "orders": self.orders,
+            "rejects": self.rejects,
+            "fills": self.fills,
+            "positions": self.positions,
+            "account_curve": self.account_curve,
+            "fees": self.fees,
+            "native_statistics": _semantic_statistics(self.native_statistics),
+        }
+        if self.cost_receipt is not None:
+            payload["cost_receipt"] = self.cost_receipt
+        return normalize_value(payload)
 
     @property
     def output_hash(self) -> str:
