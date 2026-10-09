@@ -16,6 +16,7 @@ from quant_runtime.adapters.discovery.qlib.capsule import (
     build_discovery_capsule,
     capsule_bytes,
 )
+from quant_runtime.adapters.formal.nautilus.adapter import NautilusWorkspaceAdapter
 from quant_runtime.adapters.formal.nautilus.cost_receipt import verify_cost_receipt
 from quant_runtime.adapters.formal.nautilus.reporting_input import REPORTING_INPUT_SCHEMA
 from quant_runtime.adapters.interface import (
@@ -202,12 +203,23 @@ class RuntimeExecutor:
                     "image_identity": image_identity,
                     "lock_identity": lock_identity,
                 }
+            if not self._sandbox_backend_is_production():
+                return self._legacy_runtime_identity()
             raise ValueError("sandbox dependency environment lacks image and lock identity")
+        return self._legacy_runtime_identity()
+
+    def _legacy_runtime_identity(self) -> dict[str, str]:
         return {
             "image_identity": "sha256:" + sha256_value({"worker_id": self.worker_id}),
             "lock_identity": "sha256:"
             + sha256_value({"worker_id": self.worker_id, "runtime": WORKER_ID}),
         }
+
+    def _sandbox_backend_is_production(self) -> bool:
+        backend = self.sandbox_backend
+        if backend is None:
+            return True
+        return bool(getattr(backend, "production", True))
 
     def _identity(
         self,
@@ -377,6 +389,7 @@ class RuntimeExecutor:
                             storage=storage,
                             request_hash=request_hash,
                             runtime_identity=identity["runtime"],
+                            request_schema=request.get("schema"),
                         )
                     )
             formal_results = tuple(collected)
@@ -410,8 +423,6 @@ class RuntimeExecutor:
             for item in formal_results
             if item.cost_receipt is not None
         }
-        if cost_receipts:
-            result["cost_receipts"] = cost_receipts
         if discovery_result is not None:
             result["discovery"] = {
                 "adapter": discovery_result.backend_id,
@@ -617,7 +628,9 @@ class RuntimeExecutor:
             raise SandboxAttemptFailure(outcome)
         payload = _object(value, "payload")
         cost_receipt = payload.get("cost_receipt")
-        if not isinstance(snapshot.dataset, CanonicalFuturesDataset):
+        if self._sandbox_backend_is_production() and not isinstance(
+            snapshot.dataset, CanonicalFuturesDataset
+        ):
             if not isinstance(cost_receipt, Mapping):
                 raise ValueError("successful Nautilus equity execution lacks a cost receipt")
             cost_receipt = verify_cost_receipt(
@@ -657,6 +670,7 @@ class RuntimeExecutor:
         storage: AdapterStorage,
         request_hash: str,
         runtime_identity: Mapping[str, Any],
+        request_schema: str | None,
     ) -> FormalAdapterResult:
         adapter = self.registry.create("formal", execution.adapter)
         semantics = _read_semantics(execution)
@@ -680,10 +694,11 @@ class RuntimeExecutor:
                     cache_transform_version=cache.transform_version,
                     request_hash=request_hash,
                     runtime_identity=dict(runtime_identity),
+                    request_schema=request_schema,
                 ),
                 formal_id=execution.formal_id,
             )
-        if execution.adapter == "nautilus" and not isinstance(
+        if isinstance(adapter, NautilusWorkspaceAdapter) and not isinstance(
             snapshot.dataset, CanonicalFuturesDataset
         ):
             if not isinstance(result.cost_receipt, Mapping):
@@ -703,10 +718,9 @@ class RuntimeExecutor:
 
 
 def _formal_result_contract(value: FormalAdapterResult) -> dict[str, Any]:
-    result = {"adapter": value.backend_id, "metrics": value.metrics}
-    if value.cost_receipt is not None:
-        result["cost_receipt"] = value.cost_receipt
-    return result
+    # Result v2/v4 are Workspace-owned schemas; the receipt is published in the
+    # runtime manifest artifact because those contracts do not expose receipt fields.
+    return {"adapter": value.backend_id, "metrics": value.metrics}
 
 
 def _object(value: Mapping[str, Any], name: str) -> dict[str, Any]:

@@ -83,7 +83,11 @@ class NautilusWorkspaceAdapter:
                 {"equity"}
             ) or value.package.frequencies != frozenset({"1d"}):
                 raise ValueError("daily equity snapshot requires an equity/1d strategy package")
-            config = _formal_config(value)
+            config = _formal_config(
+                value,
+                allow_legacy_metadata=value.request_schema
+                == "quant-research.workspace-run-request.v2",
+            )
             config.validate(len(dataset.instruments))
             cost_receipt = _build_cost_receipt(value, config, formal_id)
             result = run_engine(
@@ -131,7 +135,7 @@ class NautilusWorkspaceAdapter:
         )
 
 
-def _formal_config(value: FormalRunInput) -> FormalConfig:
+def _formal_config(value: FormalRunInput, *, allow_legacy_metadata: bool = False) -> FormalConfig:
     execution = _execution_object(value.config)
     allowed = {
         "fees",
@@ -141,6 +145,8 @@ def _formal_config(value: FormalRunInput) -> FormalConfig:
         "slippage_bps",
         "tick_size",
     }
+    if allow_legacy_metadata:
+        allowed.add("score")
     unknown = set(execution) - allowed
     if unknown:
         raise ValueError(f"formal config contains unknown fields: {sorted(unknown)}")
@@ -209,7 +215,11 @@ def _formal_config(value: FormalRunInput) -> FormalConfig:
 
 def _build_cost_receipt(
     value: FormalRunInput, config: FormalConfig, formal_id: str
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
+    if value.request_hash is None and value.runtime_identity is None:
+        # Direct adapter callers predate public receipt publication and do not have
+        # an immutable Workspace binding to attach to a local result.
+        return None
     if not value.request_hash:
         raise ValueError("formal cost receipt requires the immutable request hash")
     runtime = value.runtime_identity

@@ -41,6 +41,7 @@ class FormalRunInput:
     cache_transform_version: str | None
     request_hash: str | None = None
     runtime_identity: dict[str, Any] | None = None
+    request_schema: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
