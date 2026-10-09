@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal
+from typing import Any
 
 import nautilus_trader
 
 from quant_runtime.adapters.data.markethub.cache import MarketHubCache
 from quant_runtime.adapters.data.markethub.futures_model import CanonicalFuturesDataset
 from quant_runtime.adapters.formal.nautilus.china_market_rules import FeeSpec
+from quant_runtime.adapters.formal.nautilus.cost_receipt import (
+    EffectiveCostConfig,
+    build_cost_receipt,
+)
 from quant_runtime.adapters.formal.nautilus.futures_config import FuturesExecutionConfig
 from quant_runtime.adapters.formal.nautilus.futures_runner import run_futures_engine
 from quant_runtime.adapters.formal.nautilus.runner import (
@@ -19,7 +25,7 @@ from quant_runtime.adapters.interface import FormalAdapterResult, FormalRunInput
 from quant_runtime.artifacts import artifact_records
 from quant_runtime.entrypoint import load_package_entrypoint
 
-ADAPTER_VERSION = "1.2.0"
+ADAPTER_VERSION = "1.3.0"
 OPERATIONAL_METRICS = frozenset(
     {"data_injection_seconds", "engine_run_seconds", "rss_before_bytes", "rss_after_bytes"}
 )
@@ -55,26 +61,37 @@ class NautilusWorkspaceAdapter:
             )
         except Exception as exc:
             raise NautilusStrategyError("Nautilus strategy entrypoint was rejected") from exc
-        config = _formal_config(value)
         if isinstance(dataset, CanonicalFuturesDataset):
+            futures_config = _futures_config(value)
             result = run_futures_engine(
                 dataset,
-                _futures_config(value),
-                config.strategy,
+                futures_config,
+                StrategyContext(
+                    strategy_id=value.package.strategy_id,
+                    revision=value.package.revision,
+                    package_hash=value.package.package_hash,
+                    parameters_hash=value.package.parameters_hash(value.parameters),
+                    parameters=value.parameters,
+                ),
                 value.output,
                 strategy_class=strategy_class,
                 decision_intents=value.package.decision_intents,
             )
+            cost_receipt = None
         else:
             if value.package.asset_classes != frozenset(
                 {"equity"}
             ) or value.package.frequencies != frozenset({"1d"}):
                 raise ValueError("daily equity snapshot requires an equity/1d strategy package")
+            config = _formal_config(value)
+            config.validate(len(dataset.instruments))
+            cost_receipt = _build_cost_receipt(value, config, formal_id)
             result = run_engine(
                 dataset,
                 config,
                 value.output,
                 strategy_class=strategy_class,
+                cost_receipt=cost_receipt,
             )
         paths = [value.output / name for name in BASE_ARTIFACTS]
         partial_lineage = value.output / "partial_snapshot_lineage.json"
@@ -110,16 +127,43 @@ class NautilusWorkspaceAdapter:
             fills=tuple(result.fills),
             account_curve=tuple(result.account_curve),
             native_evidence=evidence,
+            cost_receipt=cost_receipt,
         )
 
 
 def _formal_config(value: FormalRunInput) -> FormalConfig:
-    execution = value.config.get("execution", value.config)
-    if not isinstance(execution, dict):
-        raise ValueError("formal config execution must be an object")
+    execution = _execution_object(value.config)
+    allowed = {
+        "fees",
+        "initial_cash_cny",
+        "lot_size",
+        "market_data",
+        "slippage_bps",
+        "tick_size",
+    }
+    unknown = set(execution) - allowed
+    if unknown:
+        raise ValueError(f"formal config contains unknown fields: {sorted(unknown)}")
     fee = execution.get("fees", {})
-    if not isinstance(fee, dict):
+    if not isinstance(fee, Mapping):
         raise ValueError("formal config fees must be an object")
+    fee = dict(fee)
+    fee_allowed = {
+        "commission_rate",
+        "currency_precision",
+        "minimum_commission_cny",
+        "rounding_mode",
+        "rounding_scope",
+        "sell_stamp_duty_rate",
+    }
+    if set(fee) - fee_allowed:
+        raise ValueError(f"formal fees contain unknown fields: {sorted(set(fee) - fee_allowed)}")
+    market_data = execution.get("market_data")
+    if market_data is not None:
+        if not isinstance(market_data, Mapping) or set(market_data) != {"local_cache"}:
+            raise ValueError("formal market_data must contain only local_cache")
+        if market_data["local_cache"] not in {"none", "ephemeral"}:
+            raise ValueError("formal market_data.local_cache is invalid")
     config = FormalConfig(
         strategy=StrategyContext(
             strategy_id=value.package.strategy_id,
@@ -128,20 +172,89 @@ def _formal_config(value: FormalRunInput) -> FormalConfig:
             parameters_hash=value.package.parameters_hash(value.parameters),
             parameters=value.parameters,
         ),
-        initial_cash_cny=Decimal(str(execution.get("initial_cash_cny", "1000000.00"))),
-        lot_size=int(execution.get("lot_size", 100)),
-        tick_size=Decimal(str(execution.get("tick_size", "0.01"))),
-        slippage_bps=Decimal(str(execution.get("slippage_bps", "0"))),
+        initial_cash_cny=_decimal_value(
+            execution.get("initial_cash_cny", "1000000.00"), "initial_cash_cny"
+        ),
+        lot_size=_integer_value(execution.get("lot_size", 100), "lot_size"),
+        tick_size=_decimal_value(execution.get("tick_size", "0.01"), "tick_size"),
+        slippage_bps=_decimal_value(execution.get("slippage_bps", "0"), "slippage_bps"),
         fees=FeeSpec(
-            commission_rate=Decimal(str(fee.get("commission_rate", "0.0003"))),
-            minimum_commission_cny=Decimal(str(fee.get("minimum_commission_cny", "5.00"))),
-            sell_stamp_duty_rate=Decimal(str(fee.get("sell_stamp_duty_rate", "0.0005"))),
-            currency_precision=int(fee.get("currency_precision", 2)),
-            rounding_mode=str(fee.get("rounding_mode", "half_away_from_zero")),
-            rounding_scope=str(fee.get("rounding_scope", "per_fill")),
+            commission_rate=_decimal_value(fee.get("commission_rate", "0.0003"), "commission_rate"),
+            minimum_commission_cny=_decimal_value(
+                fee.get("minimum_commission_cny", "5.00"), "minimum_commission_cny"
+            ),
+            sell_stamp_duty_rate=_decimal_value(
+                fee.get("sell_stamp_duty_rate", "0.0005"), "sell_stamp_duty_rate"
+            ),
+            currency_precision=_integer_value(
+                fee.get("currency_precision", 2), "currency_precision"
+            ),
+            rounding_mode=_string_value(
+                fee.get("rounding_mode", "half_away_from_zero"), "rounding_mode"
+            ),
+            rounding_scope=_string_value(fee.get("rounding_scope", "per_fill"), "rounding_scope"),
         ),
     )
+    if (
+        config.initial_cash_cny <= 0
+        or config.lot_size != 100
+        or config.tick_size != Decimal("0.01")
+    ):
+        raise ValueError("formal A-share execution requires cash, 100-share lots, and 0.01 tick")
+    if config.slippage_bps < 0:
+        raise ValueError("slippage_bps must be non-negative")
+    config.fees.validate()
     return config
+
+
+def _build_cost_receipt(
+    value: FormalRunInput, config: FormalConfig, formal_id: str
+) -> dict[str, Any]:
+    if not value.request_hash:
+        raise ValueError("formal cost receipt requires the immutable request hash")
+    runtime = value.runtime_identity
+    if not isinstance(runtime, Mapping):
+        raise ValueError("formal cost receipt requires runtime image and lock identity")
+    return build_cost_receipt(
+        EffectiveCostConfig.from_formal_config(config),
+        request_hash=value.request_hash,
+        package_hash=value.package.package_hash,
+        formal_phase_id=formal_id,
+        runtime_image_identity=str(runtime.get("image_identity", "")),
+        runtime_lock_identity=str(runtime.get("lock_identity", "")),
+    )
+
+
+def _execution_object(value: Mapping[str, Any]) -> dict[str, Any]:
+    if "execution" in value:
+        if set(value) != {"execution"} or not isinstance(value["execution"], Mapping):
+            raise ValueError("formal config execution must be an object")
+        return dict(value["execution"])
+    return dict(value)
+
+
+def _decimal_value(value: Any, name: str) -> Decimal:
+    if isinstance(value, bool):
+        raise ValueError(f"formal config {name} must be a decimal")
+    try:
+        result = Decimal(str(value))
+    except Exception as exc:
+        raise ValueError(f"formal config {name} must be a decimal") from exc
+    if not result.is_finite():
+        raise ValueError(f"formal config {name} must be finite")
+    return result
+
+
+def _integer_value(value: Any, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"formal config {name} must be an integer")
+    return int(value)
+
+
+def _string_value(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"formal config {name} must be a non-empty string")
+    return value
 
 
 def _futures_config(value: FormalRunInput) -> FuturesExecutionConfig:

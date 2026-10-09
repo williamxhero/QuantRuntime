@@ -94,6 +94,7 @@ def run_engine(
     output: Path,
     *,
     strategy_class: type,
+    cost_receipt: dict[str, Any] | None = None,
 ) -> FormalOutput:
     dataset.validate()
     config.validate(len(dataset.instruments))
@@ -188,6 +189,7 @@ def run_engine(
             account_curve=dataframe_records(account),
             fees=strategy.fee_records,
             native_statistics=statistics,
+            cost_receipt=cost_receipt,
             metrics={
                 "data_injection_seconds": injection_seconds,
                 "engine_run_seconds": run_seconds,

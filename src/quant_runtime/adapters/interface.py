@@ -39,6 +39,8 @@ class FormalRunInput:
     cache_path: Path | None
     cache_policy: str
     cache_transform_version: str | None
+    request_hash: str | None = None
+    runtime_identity: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +55,7 @@ class FormalAdapterResult:
     fills: tuple[dict[str, Any], ...]
     account_curve: tuple[dict[str, Any], ...]
     native_evidence: tuple[dict[str, Any], ...]
+    cost_receipt: dict[str, Any] | None = None
 
     def as_contract(self) -> dict[str, Any]:
         return {
@@ -66,6 +69,7 @@ class FormalAdapterResult:
             "fills": list(self.fills),
             "account_curve": list(self.account_curve),
             "native_evidence": list(self.native_evidence),
+            **({"cost_receipt": self.cost_receipt} if self.cost_receipt is not None else {}),
         }
 
 

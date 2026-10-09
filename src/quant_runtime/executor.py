@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Protocol
@@ -10,10 +11,12 @@ from quant_runtime.adapters.data.markethub import (
     MarketHubDataAdapter,
     ResolvedSnapshot,
 )
+from quant_runtime.adapters.data.markethub.futures_model import CanonicalFuturesDataset
 from quant_runtime.adapters.discovery.qlib.capsule import (
     build_discovery_capsule,
     capsule_bytes,
 )
+from quant_runtime.adapters.formal.nautilus.cost_receipt import verify_cost_receipt
 from quant_runtime.adapters.formal.nautilus.reporting_input import REPORTING_INPUT_SCHEMA
 from quant_runtime.adapters.interface import (
     DiscoveryAdapterResult,
@@ -188,6 +191,24 @@ class RuntimeExecutor:
         value = self.client.materialize_artifact(uri, destination)
         return Path(str(value["path"]))
 
+    def _runtime_identity(self, request: Mapping[str, Any]) -> dict[str, str]:
+        if request.get("schema") == "quant-research.workspace-run-request.v4":
+            profile = _object(request, "sandbox_profile")
+            dependency = _object(profile, "dependency_environment")
+            image_identity = dependency.get("identity")
+            lock_identity = dependency.get("lock_identity")
+            if isinstance(image_identity, str) and isinstance(lock_identity, str):
+                return {
+                    "image_identity": image_identity,
+                    "lock_identity": lock_identity,
+                }
+            raise ValueError("sandbox dependency environment lacks image and lock identity")
+        return {
+            "image_identity": "sha256:" + sha256_value({"worker_id": self.worker_id}),
+            "lock_identity": "sha256:"
+            + sha256_value({"worker_id": self.worker_id, "runtime": WORKER_ID}),
+        }
+
     def _identity(
         self,
         run: dict[str, Any],
@@ -221,6 +242,7 @@ class RuntimeExecutor:
             "schema": "quant-runtime.identity.v2",
             "request_id": run["run_id"],
             "request_hash": run["request_hash"],
+            "runtime": self._runtime_identity(request),
             "strategy_package": package.package_ref,
             "parameters_hash": package.parameters_hash(parameters),
             "snapshot_id": snapshot.snapshot_id,
@@ -335,6 +357,7 @@ class RuntimeExecutor:
                         snapshot=snapshot,
                         output=output / "formal" / item.formal_id,
                         execution=item,
+                        runtime_identity=identity["runtime"],
                     )
                     sandbox_outcomes[f"formal.{item.formal_id}"] = formal_outcome
                     if formal_outcome["classification"] == "strategy_rejection":
@@ -352,6 +375,8 @@ class RuntimeExecutor:
                             snapshot=snapshot,
                             output=output / "formal" / item.formal_id,
                             storage=storage,
+                            request_hash=request_hash,
+                            runtime_identity=identity["runtime"],
                         )
                     )
             formal_results = tuple(collected)
@@ -378,11 +403,15 @@ class RuntimeExecutor:
                 "formal_execution_count": len(formal_results),
                 "status": "rejected" if rejected else "completed",
             },
-            "formal": {
-                item.formal_id: {"adapter": item.backend_id, "metrics": item.metrics}
-                for item in formal_results
-            },
+            "formal": {item.formal_id: _formal_result_contract(item) for item in formal_results},
         }
+        cost_receipts = {
+            item.formal_id: item.cost_receipt
+            for item in formal_results
+            if item.cost_receipt is not None
+        }
+        if cost_receipts:
+            result["cost_receipts"] = cost_receipts
         if discovery_result is not None:
             result["discovery"] = {
                 "adapter": discovery_result.backend_id,
@@ -415,6 +444,8 @@ class RuntimeExecutor:
             "artifacts": [],
             "runtime_identity": identity,
         }
+        if cost_receipts:
+            manifest["cost_receipts"] = cost_receipts
         write_json(output / "runtime_manifest.json", manifest)
         specs = tuple(
             _artifact_spec(path, output) for path in sorted(output.rglob("*")) if path.is_file()
@@ -518,6 +549,7 @@ class RuntimeExecutor:
         snapshot: ResolvedSnapshot,
         output: Path,
         execution: FormalExecution,
+        runtime_identity: Mapping[str, Any],
     ) -> tuple[FormalAdapterResult | None, dict[str, Any]]:
         if execution.adapter != "nautilus":
             raise ValueError("sandbox formal execution requires the registered Nautilus adapter")
@@ -572,6 +604,9 @@ class RuntimeExecutor:
                 "entrypoint": package.resolve_entrypoint("formal", "nautilus"),
                 "snapshot_id": snapshot.snapshot_id,
                 "cache_policy": semantics["local_cache"],
+                "request_hash": request_hash,
+                "package_hash": package.package_hash,
+                "runtime_identity": dict(runtime_identity),
             },
             output_destination=output,
         )
@@ -581,6 +616,18 @@ class RuntimeExecutor:
         if value["classification"] != "success":
             raise SandboxAttemptFailure(outcome)
         payload = _object(value, "payload")
+        cost_receipt = payload.get("cost_receipt")
+        if not isinstance(snapshot.dataset, CanonicalFuturesDataset):
+            if not isinstance(cost_receipt, Mapping):
+                raise ValueError("successful Nautilus equity execution lacks a cost receipt")
+            cost_receipt = verify_cost_receipt(
+                cost_receipt,
+                request_hash=request_hash,
+                package_hash=package.package_hash,
+                formal_phase_id=execution.formal_id,
+                runtime_image_identity=str(runtime_identity.get("image_identity", "")),
+                runtime_lock_identity=str(runtime_identity.get("lock_identity", "")),
+            )
         return (
             FormalAdapterResult(
                 formal_id=str(payload["formal_id"]),
@@ -593,6 +640,7 @@ class RuntimeExecutor:
                 fills=tuple(payload.get("fills", ())),
                 account_curve=tuple(payload.get("account_curve", ())),
                 native_evidence=tuple(payload.get("native_evidence", ())),
+                cost_receipt=cost_receipt if isinstance(cost_receipt, dict) else None,
             ),
             outcome,
         )
@@ -607,6 +655,8 @@ class RuntimeExecutor:
         snapshot: ResolvedSnapshot,
         output: Path,
         storage: AdapterStorage,
+        request_hash: str,
+        runtime_identity: Mapping[str, Any],
     ) -> FormalAdapterResult:
         adapter = self.registry.create("formal", execution.adapter)
         semantics = _read_semantics(execution)
@@ -618,7 +668,7 @@ class RuntimeExecutor:
             run_id=request_id,
             evidence_root=output,
         ) as cache:
-            return adapter.run(
+            result = adapter.run(
                 FormalRunInput(
                     package=package,
                     parameters=parameters,
@@ -628,9 +678,35 @@ class RuntimeExecutor:
                     cache_path=cache.path,
                     cache_policy=cache.policy,
                     cache_transform_version=cache.transform_version,
+                    request_hash=request_hash,
+                    runtime_identity=dict(runtime_identity),
                 ),
                 formal_id=execution.formal_id,
             )
+        if execution.adapter == "nautilus" and not isinstance(
+            snapshot.dataset, CanonicalFuturesDataset
+        ):
+            if not isinstance(result.cost_receipt, Mapping):
+                raise ValueError("successful Nautilus equity execution lacks a cost receipt")
+            result = replace(
+                result,
+                cost_receipt=verify_cost_receipt(
+                    result.cost_receipt,
+                    request_hash=request_hash,
+                    package_hash=package.package_hash,
+                    formal_phase_id=execution.formal_id,
+                    runtime_image_identity=str(runtime_identity.get("image_identity", "")),
+                    runtime_lock_identity=str(runtime_identity.get("lock_identity", "")),
+                ),
+            )
+        return result
+
+
+def _formal_result_contract(value: FormalAdapterResult) -> dict[str, Any]:
+    result = {"adapter": value.backend_id, "metrics": value.metrics}
+    if value.cost_receipt is not None:
+        result["cost_receipt"] = value.cost_receipt
+    return result
 
 
 def _object(value: Mapping[str, Any], name: str) -> dict[str, Any]:

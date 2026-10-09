@@ -615,6 +615,12 @@ def _formal(protocol: dict[str, Any], result_path: Path, output_path: Path) -> i
                 cache_path=None,
                 cache_policy=str(config.get("cache_policy", "none")),
                 cache_transform_version=None,
+                request_hash=(str(config["request_hash"]) if "request_hash" in config else None),
+                runtime_identity=(
+                    dict(config["runtime_identity"])
+                    if isinstance(config.get("runtime_identity"), dict)
+                    else None
+                ),
             ),
             formal_id=config["formal_id"],
         )
