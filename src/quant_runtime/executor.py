@@ -193,7 +193,11 @@ class RuntimeExecutor:
         return Path(str(value["path"]))
 
     def _runtime_identity(self, request: Mapping[str, Any]) -> dict[str, str]:
-        if request.get("schema") == "quant-research.workspace-run-request.v4":
+        if request.get("schema") in {
+            "quant-research.workspace-run-request.v4",
+            "quant-research.workspace-run-request.v5",
+            "quant-research.workspace-run-request.v6",
+        }:
             profile = _object(request, "sandbox_profile")
             dependency = _object(profile, "dependency_environment")
             image_identity = dependency.get("identity")
@@ -269,7 +273,11 @@ class RuntimeExecutor:
                 "adapter_version": self.data_adapter.adapter_version,
             },
         }
-        if request.get("schema") == "quant-research.workspace-run-request.v4":
+        if request.get("schema") in {
+            "quant-research.workspace-run-request.v4",
+            "quant-research.workspace-run-request.v5",
+            "quant-research.workspace-run-request.v6",
+        }:
             profile = _object(request, "sandbox_profile")
             conformance = _object(request, "behavioral_conformance")
             identity.update(
@@ -310,7 +318,11 @@ class RuntimeExecutor:
         discovery_result = None
         discovery_outcome = None
         sandbox_outcomes: dict[str, dict[str, Any]] = {}
-        sandboxed = request.get("schema") == "quant-research.workspace-run-request.v4"
+        sandboxed = request.get("schema") in {
+            "quant-research.workspace-run-request.v4",
+            "quant-research.workspace-run-request.v5",
+            "quant-research.workspace-run-request.v6",
+        }
         profile = _object(request, "sandbox_profile") if sandboxed else None
         try:
             policy = (
